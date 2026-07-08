@@ -6,7 +6,8 @@ package llmcost
 //
 // Identity entries are intentional, not redundant: presence in this map is
 // the module's guarantee that the id prices. TestAliasesResolve asserts every
-// entry resolves to non-zero rates against the vendored data, and the weekly
+// entry resolves against the vendored data with positive input, cache-read,
+// and output rates (plus cache-creation for the claude ids), and the weekly
 // sync workflow relies on that test as its validation gate — if upstream
 // renames or drops a key, the sync PR goes red instead of a consumer silently
 // billing zero. When a new internal model id enters service, add it here (and

@@ -1,10 +1,14 @@
 package llmcost
 
 import (
+	"cmp"
 	_ "embed"
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"regexp"
+	"slices"
+	"strconv"
 	"sync"
 )
 
@@ -22,35 +26,122 @@ type Nls = int64
 
 const nlsPerUSD = 100_000
 
-// Usage counts the tokens of one response. Counts are disjoint
-// (Anthropic-style): InputTokens is uncached input only, CachedInputTokens is
-// cache reads billed at the cache-read rate. For OpenAI-style APIs, where
-// prompt_tokens includes cached_tokens, subtract before constructing a Usage.
-type Usage struct {
-	InputTokens, CachedInputTokens, OutputTokens int64
+// ClaudeUsage holds the RAW token counts of one Anthropic API response, named
+// after the API's usage fields. Anthropic reports DISJOINT counts:
+//
+//	InputTokens              = usage.input_tokens               — uncached input ONLY, excludes both cache fields
+//	CacheReadInputTokens     = usage.cache_read_input_tokens    — cache hits, billed at the cache-read rate (0.1× input)
+//	CacheCreationInputTokens = usage.cache_creation_input_tokens — cache writes, billed at the cache-write rate (1.25× input)
+//	OutputTokens             = usage.output_tokens
+//
+// Copy the four fields straight from the response; no arithmetic is needed or
+// wanted. The request's total prompt size — which decides context-window
+// pricing tiers — is the sum of the three input fields, computed internally.
+//
+// Anthropic's 1-hour-TTL cache writes (2× input) are out of scope: callers
+// report a single cache-write count, and it bills at the default 5-minute
+// rate.
+type ClaudeUsage struct {
+	InputTokens              int64
+	CacheReadInputTokens     int64
+	CacheCreationInputTokens int64
+	OutputTokens             int64
+}
+
+// OpenAIUsage holds the RAW token counts of one OpenAI API response, named
+// after the API's usage fields. OpenAI reports OVERLAPPING counts:
+//
+//	InputTokens       = usage.input_tokens (a.k.a. prompt_tokens) — total input, INCLUDES the cached portion
+//	CachedInputTokens = input_tokens_details.cached_tokens        — the cached subset of InputTokens
+//	OutputTokens      = usage.output_tokens                       — total output; reasoning tokens are a subset, already included
+//
+// Copy the fields straight from the response; the uncached remainder
+// (InputTokens - CachedInputTokens) is computed internally. Do NOT
+// pre-subtract — that is this module's job, and doing it twice under-bills.
+// CachedInputTokens > InputTokens is impossible in a real response and
+// panics. OpenAI does not bill cache writes, so there is no cache-creation
+// field.
+type OpenAIUsage struct {
+	InputTokens       int64
+	CachedInputTokens int64
+	OutputTokens      int64
+}
+
+// TierRates are exact USD-per-token prices for the four billable components.
+// A nil rate means the provider does not price that component (e.g. OpenAI
+// models have no CacheCreation); costing usage with a positive count on a nil
+// component fails rather than billing zero.
+type TierRates struct {
+	Input, CacheRead, CacheCreation, Output *big.Rat
+}
+
+// Tier is a context-window pricing tier: when a request's total prompt tokens
+// STRICTLY exceed AbovePromptTokens, the ENTIRE request — every input, cache,
+// and output token, not just the excess — bills at these rates. That is how
+// the providers bill long context (e.g. Anthropic's 1M-context beta bills the
+// whole request at the >200k rates) and how LiteLLM's own cost calculator
+// interprets its *_above_Xk_tokens fields. Rates are fully resolved at parse
+// time: a component upstream leaves untiered inherits the base rate.
+type Tier struct {
+	AbovePromptTokens int64
+	TierRates
 }
 
 // Rates are a model's exact USD-per-token prices, parsed from LiteLLM's
 // decimal literals (never through float64).
 type Rates struct {
-	Input, CachedInput, Output *big.Rat
+	Base  TierRates
+	Tiers []Tier // ascending by AbovePromptTokens; empty when untiered
 }
 
-// Cost prices a whole response in nls. It computes rate × tokens exactly per
-// component, sums in USD, and ceiling-rounds only the final total — matching
-// back's ceiling convention and guaranteeing that sub-nls token costs
-// accumulate instead of truncating to zero. ok is false if the model is
-// unknown or has no positive rates. Negative token counts are a caller bug
-// and panic.
-func Cost(model string, u Usage) (Nls, bool) {
-	if u.InputTokens < 0 || u.CachedInputTokens < 0 || u.OutputTokens < 0 {
+// ClaudeCost prices one Anthropic response in nls from its raw usage counts.
+// It resolves the context-window tier from the total prompt size, computes
+// rate × tokens exactly per component (uncached input, cache reads, cache
+// writes, output), sums in USD, and ceiling-rounds only the final total —
+// matching back's ceiling convention and guaranteeing that sub-nls token
+// costs accumulate instead of truncating to zero. ok is false if the model is
+// unknown, unpriced, or lacks a rate for a component the usage reports.
+// Negative counts are a caller bug and panic.
+func ClaudeCost(model string, u ClaudeUsage) (Nls, bool) {
+	if u.InputTokens < 0 || u.CacheReadInputTokens < 0 || u.CacheCreationInputTokens < 0 || u.OutputTokens < 0 {
 		panic(fmt.Sprintf("llmcost: negative token counts: %+v", u))
 	}
 	r, ok := table()[resolve(model)]
 	if !ok {
 		return 0, false
 	}
-	return ceilNls(usd(r, u)), true
+	return cost(r, components{
+		input:         u.InputTokens,
+		cacheRead:     u.CacheReadInputTokens,
+		cacheCreation: u.CacheCreationInputTokens,
+		output:        u.OutputTokens,
+	})
+}
+
+// OpenAICost prices one OpenAI response in nls from its raw usage counts. It
+// normalizes OpenAI's overlapping counts (InputTokens includes the cached
+// subset) into disjoint components, then prices exactly as ClaudeCost does.
+// The full InputTokens — cached and uncached — counts toward the
+// context-window tier threshold. ok is false if the model is unknown,
+// unpriced, or lacks a cache-read rate while CachedInputTokens > 0. Negative
+// counts, or CachedInputTokens exceeding InputTokens, are caller bugs and
+// panic.
+func OpenAICost(model string, u OpenAIUsage) (Nls, bool) {
+	if u.InputTokens < 0 || u.CachedInputTokens < 0 || u.OutputTokens < 0 {
+		panic(fmt.Sprintf("llmcost: negative token counts: %+v", u))
+	}
+	if u.CachedInputTokens > u.InputTokens {
+		panic(fmt.Sprintf("llmcost: CachedInputTokens exceeds InputTokens (cached is a subset of input in OpenAI usage): %+v", u))
+	}
+	r, ok := table()[resolve(model)]
+	if !ok {
+		return 0, false
+	}
+	return cost(r, components{
+		input:     u.InputTokens - u.CachedInputTokens,
+		cacheRead: u.CachedInputTokens,
+		output:    u.OutputTokens,
+	})
 }
 
 // RatesFor returns the raw per-token rates for model, for callers that want
@@ -61,11 +152,11 @@ func RatesFor(model string) (Rates, bool) {
 	if !ok {
 		return Rates{}, false
 	}
-	return Rates{
-		Input:       new(big.Rat).Set(r.Input),
-		CachedInput: new(big.Rat).Set(r.CachedInput),
-		Output:      new(big.Rat).Set(r.Output),
-	}, true
+	out := Rates{Base: r.Base.clone(), Tiers: make([]Tier, len(r.Tiers))}
+	for i, t := range r.Tiers {
+		out.Tiers[i] = Tier{AbovePromptTokens: t.AbovePromptTokens, TierRates: t.clone()}
+	}
+	return out, true
 }
 
 // resolve maps an internal model id to its LiteLLM key; ids not in the alias
@@ -77,16 +168,79 @@ func resolve(model string) string {
 	return model
 }
 
-// usd is the pure core: Σ rate × tokens, exact in USD.
-func usd(r Rates, u Usage) *big.Rat {
-	total := new(big.Rat).Mul(r.Input, new(big.Rat).SetInt64(u.InputTokens))
-	total.Add(total, new(big.Rat).Mul(r.CachedInput, new(big.Rat).SetInt64(u.CachedInputTokens)))
-	return total.Add(total, new(big.Rat).Mul(r.Output, new(big.Rat).SetInt64(u.OutputTokens)))
+// components are one response's token counts normalized to disjoint billable
+// parts: input is UNCACHED input only.
+type components struct {
+	input, cacheRead, cacheCreation, output int64
+}
+
+// promptTokens is the request's total prompt size — the context-window tier
+// discriminator. Both providers gate long-context pricing on total input
+// including cached tokens.
+func (c components) promptTokens() int64 {
+	return c.input + c.cacheRead + c.cacheCreation
+}
+
+// cost is the pure core: resolve the tier from total prompt size, then
+// Σ rate × tokens exactly in USD and ceiling-round the total to nls. A
+// positive count on a component the tier has no rate for fails — a model that
+// cannot price reported usage must never bill it as zero.
+func cost(r Rates, c components) (Nls, bool) {
+	t := r.tier(c.promptTokens())
+	total := new(big.Rat)
+	for _, part := range []struct {
+		rate   *big.Rat
+		tokens int64
+	}{
+		{t.Input, c.input},
+		{t.CacheRead, c.cacheRead},
+		{t.CacheCreation, c.cacheCreation},
+		{t.Output, c.output},
+	} {
+		if part.tokens == 0 {
+			continue
+		}
+		if part.rate == nil {
+			return 0, false
+		}
+		total.Add(total, new(big.Rat).Mul(part.rate, new(big.Rat).SetInt64(part.tokens)))
+	}
+	return ceilNls(total), true
+}
+
+// tier returns the rates the ENTIRE request bills at: the highest tier whose
+// threshold the total prompt size strictly exceeds, else the base rates.
+func (r Rates) tier(promptTokens int64) TierRates {
+	for _, t := range slices.Backward(r.Tiers) {
+		if promptTokens > t.AbovePromptTokens {
+			return t.TierRates
+		}
+	}
+	return r.Base
+}
+
+func (t TierRates) clone() TierRates {
+	cp := func(r *big.Rat) *big.Rat {
+		if r == nil {
+			return nil
+		}
+		return new(big.Rat).Set(r)
+	}
+	return TierRates{Input: cp(t.Input), CacheRead: cp(t.CacheRead), CacheCreation: cp(t.CacheCreation), Output: cp(t.Output)}
+}
+
+// priceable reports whether a component set can bill: positive input and
+// output rates, and no negative cache rates (a nil cache rate is fine — the
+// component just cannot be used).
+func (t TierRates) priceable() bool {
+	pos := func(r *big.Rat) bool { return r != nil && r.Sign() > 0 }
+	nonneg := func(r *big.Rat) bool { return r == nil || r.Sign() >= 0 }
+	return pos(t.Input) && pos(t.Output) && nonneg(t.CacheRead) && nonneg(t.CacheCreation)
 }
 
 // ceilNls converts a non-negative exact USD amount to nls, rounding up.
 func ceilNls(usd *big.Rat) Nls {
-	nls := usd.Mul(usd, new(big.Rat).SetInt64(nlsPerUSD)) // usd is freshly built by usd(); mutating it here is fine
+	nls := usd.Mul(usd, new(big.Rat).SetInt64(nlsPerUSD)) // usd is freshly built by cost(); mutating it here is fine
 	q, rem := new(big.Int).QuoRem(nls.Num(), nls.Denom(), new(big.Int))
 	if rem.Sign() > 0 {
 		q.Add(q, big.NewInt(1))
@@ -97,12 +251,8 @@ func ceilNls(usd *big.Rat) Nls {
 	return q.Int64()
 }
 
-// table lazily parses the embedded LiteLLM JSON into per-model rates, keeping
-// only models with positive input and output rates — entries without pricing
-// (free models, the "sample_spec" documentation row) must fail lookup so
-// callers fail loudly rather than bill zero. Cost fields are decoded as
-// json.Number and converted to big.Rat from their decimal literals, so rates
-// are exact. A malformed embed is impossible past CI and panics.
+// table lazily parses the embedded LiteLLM JSON into per-model rates. A
+// malformed embed is impossible past CI and panics.
 var table = sync.OnceValue(func() map[string]Rates {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(litellmJSON, &raw); err != nil {
@@ -110,33 +260,84 @@ var table = sync.OnceValue(func() map[string]Rates {
 	}
 	models := make(map[string]Rates, len(raw))
 	for model, spec := range raw {
-		var costs struct {
-			Input  json.Number `json:"input_cost_per_token"`
-			Cached json.Number `json:"cache_read_input_token_cost"`
-			Output json.Number `json:"output_cost_per_token"`
+		if r, ok := parseModel(spec); ok {
+			models[model] = r
 		}
-		if json.Unmarshal(spec, &costs) != nil {
-			continue // row whose cost fields aren't numbers — not priceable
-		}
-		in, out := rat(costs.Input), rat(costs.Output)
-		if in == nil || out == nil || in.Sign() <= 0 || out.Sign() <= 0 {
-			continue // unpriced or free — must not resolve
-		}
-		cached := rat(costs.Cached)
-		if cached == nil {
-			cached = in // no cache-read discount: cached tokens bill at the full input rate
-		}
-		if cached.Sign() < 0 {
-			continue // garbage upstream rate — must not produce negative bills
-		}
-		models[model] = Rates{Input: in, CachedInput: cached, Output: out}
 	}
 	return models
 })
 
-// rat converts a JSON number literal to an exact rational; nil if absent or
-// unparseable.
-func rat(n json.Number) *big.Rat {
+// tierKey matches LiteLLM's tier-defining keys (input_cost_per_token_above_200k_tokens,
+// ..._above_128k_tokens, ..._above_272_tokens). Anchoring to the end excludes
+// service-tier variants like *_tokens_priority, which price OpenAI's
+// priority/flex tiers — out of scope (standard tier only), exactly as
+// LiteLLM's own calculator excludes them from threshold detection.
+var tierKey = regexp.MustCompile(`^input_cost_per_token_above_(\d+)(k?)_tokens$`)
+
+// parseModel builds Rates from one LiteLLM model spec. ok is false for
+// entries that cannot bill — no pricing, zero/negative rates, or rows like
+// "sample_spec" — which therefore must not resolve. Cost fields decode as
+// json.Number and convert to big.Rat from their decimal literals, so rates
+// are exact. Tiers come from the *_above_Xk_tokens key family, keyed on the
+// input-cost key (as in LiteLLM's calculator); each tier's components resolve
+// to the tiered rate when upstream defines one and inherit the base rate
+// otherwise.
+func parseModel(spec json.RawMessage) (Rates, bool) {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(spec, &fields) != nil {
+		return Rates{}, false
+	}
+	rates := func(suffix string, base TierRates) TierRates {
+		or := func(r, fallback *big.Rat) *big.Rat {
+			if r != nil {
+				return r
+			}
+			return fallback
+		}
+		return TierRates{
+			Input:         or(ratField(fields, "input_cost_per_token"+suffix), base.Input),
+			CacheRead:     or(ratField(fields, "cache_read_input_token_cost"+suffix), base.CacheRead),
+			CacheCreation: or(ratField(fields, "cache_creation_input_token_cost"+suffix), base.CacheCreation),
+			Output:        or(ratField(fields, "output_cost_per_token"+suffix), base.Output),
+		}
+	}
+	r := Rates{Base: rates("", TierRates{})}
+	if !r.Base.priceable() {
+		return Rates{}, false
+	}
+	for key := range fields {
+		m := tierKey.FindStringSubmatch(key)
+		if m == nil {
+			continue
+		}
+		threshold, err := strconv.ParseInt(m[1], 10, 64)
+		if err != nil || threshold <= 0 {
+			continue
+		}
+		if m[2] == "k" {
+			threshold *= 1000
+		}
+		tier := Tier{AbovePromptTokens: threshold, TierRates: rates("_above_"+m[1]+m[2]+"_tokens", r.Base)}
+		if !tier.priceable() {
+			continue // garbage tier rates upstream — never bill from them
+		}
+		r.Tiers = append(r.Tiers, tier)
+	}
+	slices.SortFunc(r.Tiers, func(a, b Tier) int { return cmp.Compare(a.AbovePromptTokens, b.AbovePromptTokens) })
+	return r, true
+}
+
+// ratField converts one JSON number field to an exact rational; nil if
+// absent, non-numeric, or unparseable.
+func ratField(fields map[string]json.RawMessage, key string) *big.Rat {
+	raw, ok := fields[key]
+	if !ok {
+		return nil
+	}
+	var n json.Number
+	if json.Unmarshal(raw, &n) != nil {
+		return nil
+	}
 	if r, ok := new(big.Rat).SetString(string(n)); ok {
 		return r
 	}

@@ -26,7 +26,7 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       # Fetched via the authenticated API, not raw.githubusercontent.com —
       # anonymous fetches get 429-rate-limited from shared runner IPs.
       - name: fetch upstream at pinned-to-be commit
@@ -46,7 +46,7 @@ jobs:
             cp /tmp/upstream.json model_prices_and_context_window.json
             sed -i "s/^commit: .*/commit: ${sha}/" VENDORED_FROM
           fi
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         if: steps.fetch.outputs.changed == 'true'
         with:
           go-version-file: go.mod
@@ -57,7 +57,7 @@ jobs:
         run: go test ./...
       - name: open PR
         if: steps.fetch.outputs.changed == 'true'
-        uses: peter-evans/create-pull-request@v7
+        uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676 # v7
         with:
           branch: sync/litellm-prices
           commit-message: "Sync LiteLLM pricing data to BerriAI/litellm@${{ steps.fetch.outputs.sha }}"
