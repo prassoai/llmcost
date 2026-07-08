@@ -245,8 +245,15 @@ func (t TierRates) clone() TierRates {
 }
 
 // priceable reports whether a component set can bill: positive input and
-// output rates, and no negative cache rates (a nil cache rate is fine — the
-// component just cannot be used).
+// output rates, and no negative cache rates. Nil and zero cache rates are
+// deliberately distinct: ABSENT upstream means the component is unpriced and
+// using it fails, while an EXPLICIT 0 is upstream asserting the component is
+// free and is honored — real free tiers exist (DeepSeek and OpenAI-via-
+// gateway entries list cache writes at 0 because those providers genuinely
+// don't bill them), and LiteLLM's own calculator prices explicit zeros as
+// free. The alias-map gate separately requires strictly positive cache rates
+// for the ids we bill, so a zero sneaking into one of OUR models still fails
+// the sync PR.
 func (t TierRates) priceable() bool {
 	pos := func(r *big.Rat) bool { return r != nil && r.Sign() > 0 }
 	nonneg := func(r *big.Rat) bool { return r == nil || r.Sign() >= 0 }

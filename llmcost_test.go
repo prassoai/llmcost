@@ -187,6 +187,21 @@ func TestNoCacheRateFallback(t *testing.T) {
 	}
 }
 
+// TestExplicitZeroCacheRateIsFree encodes the absent-vs-zero distinction: an
+// upstream rate explicitly listed as 0 is a real free tier (DeepSeek lists
+// cache writes at 0 because it genuinely doesn't bill them; gateway-hosted
+// OpenAI entries do the same) and prices as $0, while an ABSENT rate is
+// unpriced and fails — see TestNoCacheRateFallback. Collapsing the two would
+// turn correctly-priced free usage into false failures. The ids in the alias
+// map are held to a stricter bar: TestAliasesResolve requires their cache
+// rates to be strictly positive.
+func TestExplicitZeroCacheRateIsFree(t *testing.T) {
+	r := mustParse(t, `{"input_cost_per_token": 1e-06, "output_cost_per_token": 2e-06, "cache_creation_input_token_cost": 0.0}`)
+	if got, ok := cost(r, components{input: 100, cacheCreation: 5000}); !ok || got != 10 {
+		t.Fatalf("cost = %d, %v; want 10, true (free cache writes bill $0, input still bills)", got, ok)
+	}
+}
+
 // TestOpenAINormalization encodes the OpenAI provider convention: raw
 // InputTokens INCLUDES the cached subset, and the module — not the caller —
 // splits it. 1000 total input with 400 cached on gpt-5.4 rates:
