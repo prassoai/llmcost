@@ -12,14 +12,16 @@
 //
 // # Provider-explicit usage — the part callers must not get wrong
 //
-// The two providers report token counts DIFFERENTLY, so each has its own
-// usage type and entry point taking that provider's RAW reported counts;
-// normalization is internal. Never feed one provider's counts through the
-// other's entry point, and never pre-subtract.
+// The two providers report token counts DIFFERENTLY, so [Cost] takes a
+// sealed [Usage] interface implemented only by [ClaudeUsage] and
+// [OpenAIUsage]. Each provider type takes that provider's RAW reported
+// counts and normalizes them into disjoint billable components internally.
+// Never wrap one provider's counts in the other's type, and never
+// pre-subtract.
 //
 // Anthropic reports disjoint counts — input_tokens EXCLUDES cache activity:
 //
-//	llmcost.ClaudeCost("claude-opus-4-8", llmcost.ClaudeUsage{
+//	llmcost.Cost("claude-opus-4-8", llmcost.ClaudeUsage{
 //		InputTokens:                u.InputTokens,          // uncached input only
 //		CacheReadInputTokens:       u.CacheReadInputTokens, // billed at the cache-read rate
 //		CacheCreationInputTokens:   u.CacheCreationInputTokens, // TOTAL cache writes, both TTLs
@@ -29,13 +31,13 @@
 //
 // OpenAI reports overlapping counts — input_tokens INCLUDES cached_tokens:
 //
-//	llmcost.OpenAICost("gpt-5.4", llmcost.OpenAIUsage{
+//	llmcost.Cost("gpt-5.4", llmcost.OpenAIUsage{
 //		InputTokens:       u.InputTokens,       // total input, cached included
 //		CachedInputTokens: u.CachedInputTokens, // the cached subset of InputTokens
 //		OutputTokens:      u.OutputTokens,      // reasoning tokens already included
 //	})
 //
-// Both return (Nls, bool): ok=false whenever the response cannot be priced —
+// Cost returns (Nls, bool): ok=false whenever the response cannot be priced —
 // unknown model, unpriced model, or usage on a component the model has no
 // rate for. Nothing ever silently bills zero or falls back to another
 // component's rate. [RatesFor] exposes the raw per-token rates (base and

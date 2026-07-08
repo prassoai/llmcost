@@ -103,58 +103,62 @@ type Rates struct {
 	Tiers []Tier // ascending by AbovePromptTokens; empty when untiered
 }
 
-// ClaudeCost prices one Anthropic response in nls from its raw usage counts.
-// It resolves the context-window tier from the total prompt size, computes
-// rate × tokens exactly per component (uncached input, cache reads, cache
-// writes, output), sums in USD, and ceiling-rounds only the final total —
-// matching back's ceiling convention and guaranteeing that sub-nls token
-// costs accumulate instead of truncating to zero. ok is false if the model is
-// unknown, unpriced, or lacks a rate for a component the usage reports.
-// Negative counts are a caller bug and panic.
-func ClaudeCost(model string, u ClaudeUsage) (Nls, bool) {
+// Usage is one response's raw token usage. It is implemented only by
+// [ClaudeUsage] and [OpenAIUsage] — the interface is sealed, so the only way
+// to supply usage is to hand a provider type its RAW reported counts. Each
+// provider type normalizes its own reporting convention (Anthropic's
+// disjoint counts, OpenAI's overlapping ones) into the module's disjoint
+// billable components; callers never do that arithmetic.
+type Usage interface {
+	// disjoint validates the raw counts and normalizes them into disjoint
+	// billable components. Counts impossible in a real response — negative,
+	// or a subset exceeding its total — are caller bugs and panic.
+	disjoint() components
+}
+
+// Cost prices one response in nls. It normalizes the provider's raw usage
+// into disjoint components, resolves the context-window tier from the total
+// prompt size, computes rate × tokens exactly per component, sums in USD, and
+// ceiling-rounds only the final total — matching back's ceiling convention
+// and guaranteeing that sub-nls token costs accumulate instead of truncating
+// to zero. ok is false if the model is unknown, unpriced, or lacks a rate for
+// a component the usage reports.
+func Cost(model string, u Usage) (Nls, bool) {
+	r, ok := table()[resolve(model)]
+	if !ok {
+		return 0, false
+	}
+	return cost(r, u.disjoint())
+}
+
+func (u ClaudeUsage) disjoint() components {
 	if u.InputTokens < 0 || u.CacheReadInputTokens < 0 || u.CacheCreationInputTokens < 0 || u.CacheCreation1hInputTokens < 0 || u.OutputTokens < 0 {
 		panic(fmt.Sprintf("llmcost: negative token counts: %+v", u))
 	}
 	if u.CacheCreation1hInputTokens > u.CacheCreationInputTokens {
 		panic(fmt.Sprintf("llmcost: CacheCreation1hInputTokens exceeds CacheCreationInputTokens (the 1h count is a subset of the total): %+v", u))
 	}
-	r, ok := table()[resolve(model)]
-	if !ok {
-		return 0, false
-	}
-	return cost(r, components{
-		input:           u.InputTokens,
+	return components{
+		input:           u.InputTokens, // already disjoint: Anthropic's input_tokens excludes cache activity
 		cacheRead:       u.CacheReadInputTokens,
 		cacheCreation:   u.CacheCreationInputTokens - u.CacheCreation1hInputTokens,
 		cacheCreation1h: u.CacheCreation1hInputTokens,
 		output:          u.OutputTokens,
-	})
+	}
 }
 
-// OpenAICost prices one OpenAI response in nls from its raw usage counts. It
-// normalizes OpenAI's overlapping counts (InputTokens includes the cached
-// subset) into disjoint components, then prices exactly as ClaudeCost does.
-// The full InputTokens — cached and uncached — counts toward the
-// context-window tier threshold. ok is false if the model is unknown,
-// unpriced, or lacks a cache-read rate while CachedInputTokens > 0. Negative
-// counts, or CachedInputTokens exceeding InputTokens, are caller bugs and
-// panic.
-func OpenAICost(model string, u OpenAIUsage) (Nls, bool) {
+func (u OpenAIUsage) disjoint() components {
 	if u.InputTokens < 0 || u.CachedInputTokens < 0 || u.OutputTokens < 0 {
 		panic(fmt.Sprintf("llmcost: negative token counts: %+v", u))
 	}
 	if u.CachedInputTokens > u.InputTokens {
 		panic(fmt.Sprintf("llmcost: CachedInputTokens exceeds InputTokens (cached is a subset of input in OpenAI usage): %+v", u))
 	}
-	r, ok := table()[resolve(model)]
-	if !ok {
-		return 0, false
-	}
-	return cost(r, components{
-		input:     u.InputTokens - u.CachedInputTokens,
+	return components{
+		input:     u.InputTokens - u.CachedInputTokens, // OpenAI's input_tokens includes the cached subset
 		cacheRead: u.CachedInputTokens,
 		output:    u.OutputTokens,
-	})
+	}
 }
 
 // RatesFor returns the raw per-token rates for model, for callers that want

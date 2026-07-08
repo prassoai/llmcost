@@ -9,14 +9,15 @@ call it "centimills").
 
 ## Usage — provider-explicit, raw counts in
 
-The two providers report token counts **differently**. Each gets its own
-entry point taking that provider's RAW usage fields; normalization happens
-inside. Never pre-subtract, never mix shapes.
+The two providers report token counts **differently**. `Cost` takes a sealed
+`Usage` interface implemented only by `ClaudeUsage` and `OpenAIUsage`; each
+takes its provider's RAW usage fields and normalizes to disjoint billable
+components inside. Never pre-subtract, never mix shapes.
 
 **Anthropic** (disjoint counts — `input_tokens` EXCLUDES cache activity):
 
 ```go
-cost, ok := llmcost.ClaudeCost("claude-opus-4-8", llmcost.ClaudeUsage{
+cost, ok := llmcost.Cost("claude-opus-4-8", llmcost.ClaudeUsage{
     InputTokens:                1200,  // usage.input_tokens — uncached input only
     CacheReadInputTokens:       45000, // usage.cache_read_input_tokens
     CacheCreationInputTokens:   3000,  // usage.cache_creation_input_tokens — TOTAL writes, both TTLs
@@ -28,7 +29,7 @@ cost, ok := llmcost.ClaudeCost("claude-opus-4-8", llmcost.ClaudeUsage{
 **OpenAI / codex** (overlapping counts — `input_tokens` INCLUDES cached):
 
 ```go
-cost, ok := llmcost.OpenAICost("gpt-5.4", llmcost.OpenAIUsage{
+cost, ok := llmcost.Cost("gpt-5.4", llmcost.OpenAIUsage{
     InputTokens:       46200, // usage.input_tokens — total, cached included
     CachedInputTokens: 45000, // input_tokens_details.cached_tokens — subset
     OutputTokens:      800,   // reasoning tokens are a subset, already included

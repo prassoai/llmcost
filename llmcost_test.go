@@ -132,17 +132,17 @@ func TestTierOnlyCacheCreation(t *testing.T) {
 // subset bills at the 1h rate (2× input) and the remainder at the 5-minute
 // rate (1.25× input). 1500 5m-writes ×3.75e-6 + 500 1h-writes ×6e-6 =
 // $0.008625 = exactly 862.5 nls → ceil 863; billing all 2000 at the 5m rate
-// would give 750, at the 1h rate 1200. ClaudeCost takes the API's raw shape —
+// would give 750, at the 1h rate 1200. Cost with ClaudeUsage takes the API's raw shape —
 // total writes plus the 1h subset — and splits internally.
 func TestCacheWriteTTLSplit(t *testing.T) {
 	got, ok := cost(mustParse(t, sonnet45Spec), components{cacheCreation: 1500, cacheCreation1h: 500})
 	if !ok || got != 863 {
 		t.Fatalf("cost = %d, %v; want 863, true", got, ok)
 	}
-	viaAPI, ok2 := ClaudeCost("claude-sonnet-4-5", ClaudeUsage{CacheCreationInputTokens: 2000, CacheCreation1hInputTokens: 500})
+	viaAPI, ok2 := Cost("claude-sonnet-4-5", ClaudeUsage{CacheCreationInputTokens: 2000, CacheCreation1hInputTokens: 500})
 	direct, ok3 := cost(table()["claude-sonnet-4-5"], components{cacheCreation: 1500, cacheCreation1h: 500})
 	if !ok2 || !ok3 || viaAPI != direct {
-		t.Fatalf("ClaudeCost = %d, %v; internal = %d, %v; want equal and ok", viaAPI, ok2, direct, ok3)
+		t.Fatalf("Cost(ClaudeUsage) = %d, %v; internal = %d, %v; want equal and ok", viaAPI, ok2, direct, ok3)
 	}
 }
 
@@ -213,10 +213,10 @@ func TestOpenAINormalization(t *testing.T) {
 		t.Fatalf("cost = %d, %v; want 310, true", got, ok)
 	}
 	// The exported entry point must produce the same normalization from raw counts.
-	viaAPI, ok2 := OpenAICost("gpt-5.4", OpenAIUsage{InputTokens: 1000, CachedInputTokens: 400, OutputTokens: 100})
+	viaAPI, ok2 := Cost("gpt-5.4", OpenAIUsage{InputTokens: 1000, CachedInputTokens: 400, OutputTokens: 100})
 	direct, ok3 := cost(table()["gpt-5.4"], components{input: 600, cacheRead: 400, output: 100})
 	if !ok2 || !ok3 || viaAPI != direct {
-		t.Fatalf("OpenAICost = %d, %v; internal = %d, %v; want equal and ok", viaAPI, ok2, direct, ok3)
+		t.Fatalf("Cost(OpenAIUsage) = %d, %v; internal = %d, %v; want equal and ok", viaAPI, ok2, direct, ok3)
 	}
 }
 
@@ -253,11 +253,11 @@ func TestCeilingRounding(t *testing.T) {
 
 // TestZeroUsageIsFree encodes the same at the exported surface.
 func TestZeroUsageIsFree(t *testing.T) {
-	if got, ok := ClaudeCost("claude-opus-4-8", ClaudeUsage{}); !ok || got != 0 {
-		t.Fatalf("ClaudeCost(zero) = %d, %v; want 0, true", got, ok)
+	if got, ok := Cost("claude-opus-4-8", ClaudeUsage{}); !ok || got != 0 {
+		t.Fatalf("Cost(zero) = %d, %v; want 0, true", got, ok)
 	}
-	if got, ok := OpenAICost("gpt-5", OpenAIUsage{}); !ok || got != 0 {
-		t.Fatalf("OpenAICost(zero) = %d, %v; want 0, true", got, ok)
+	if got, ok := Cost("gpt-5", OpenAIUsage{}); !ok || got != 0 {
+		t.Fatalf("Cost(zero) = %d, %v; want 0, true", got, ok)
 	}
 }
 
@@ -267,11 +267,11 @@ func TestZeroUsageIsFree(t *testing.T) {
 // not resolve either.
 func TestUnknownModel(t *testing.T) {
 	for _, model := range []string{"no-such-model", "sample_spec", ""} {
-		if _, ok := ClaudeCost(model, ClaudeUsage{InputTokens: 1}); ok {
-			t.Errorf("ClaudeCost(%q) resolved; want ok=false", model)
+		if _, ok := Cost(model, ClaudeUsage{InputTokens: 1}); ok {
+			t.Errorf("Cost(%q) resolved; want ok=false", model)
 		}
-		if _, ok := OpenAICost(model, OpenAIUsage{InputTokens: 1}); ok {
-			t.Errorf("OpenAICost(%q) resolved; want ok=false", model)
+		if _, ok := Cost(model, OpenAIUsage{InputTokens: 1}); ok {
+			t.Errorf("Cost(%q) resolved; want ok=false", model)
 		}
 		if _, ok := RatesFor(model); ok {
 			t.Errorf("RatesFor(%q) resolved; want ok=false", model)
@@ -351,10 +351,10 @@ func TestTiersParsedFromVendoredData(t *testing.T) {
 // the LiteLLM key it maps to price identically.
 func TestAliasMapping(t *testing.T) {
 	u := OpenAIUsage{InputTokens: 12345, CachedInputTokens: 678, OutputTokens: 910}
-	got, ok := OpenAICost("codex-mini", u)
-	want, ok2 := OpenAICost("codex-mini-latest", u)
+	got, ok := Cost("codex-mini", u)
+	want, ok2 := Cost("codex-mini-latest", u)
 	if !ok || !ok2 || got != want {
-		t.Fatalf("OpenAICost(codex-mini) = %d, %v; OpenAICost(codex-mini-latest) = %d, %v; want equal and ok", got, ok, want, ok2)
+		t.Fatalf("Cost(codex-mini) = %d, %v; Cost(codex-mini-latest) = %d, %v; want equal and ok", got, ok, want, ok2)
 	}
 }
 
@@ -364,8 +364,8 @@ func TestDirectLiteLLMKey(t *testing.T) {
 	if _, inAliases := aliases["gpt-4o"]; inAliases {
 		t.Fatal("gpt-4o joined the alias map; pick a different direct key for this test")
 	}
-	if _, ok := OpenAICost("gpt-4o", OpenAIUsage{InputTokens: 1}); !ok {
-		t.Fatal("OpenAICost(gpt-4o) did not resolve via direct LiteLLM key lookup")
+	if _, ok := Cost("gpt-4o", OpenAIUsage{InputTokens: 1}); !ok {
+		t.Fatal("Cost(gpt-4o) did not resolve via direct LiteLLM key lookup")
 	}
 }
 
@@ -390,7 +390,7 @@ func TestCostMatchesRatesFor(t *testing.T) {
 			var got Nls
 			var gotOK bool
 			if claude {
-				got, gotOK = ClaudeCost(id, ClaudeUsage{
+				got, gotOK = Cost(id, ClaudeUsage{
 					InputTokens:                c.input,
 					CacheReadInputTokens:       c.cacheRead,
 					CacheCreationInputTokens:   c.cacheCreation + c.cacheCreation1h, // raw API total
@@ -398,7 +398,7 @@ func TestCostMatchesRatesFor(t *testing.T) {
 					OutputTokens:               c.output,
 				})
 			} else {
-				got, gotOK = OpenAICost(id, OpenAIUsage{InputTokens: c.input + c.cacheRead, CachedInputTokens: c.cacheRead, OutputTokens: c.output})
+				got, gotOK = Cost(id, OpenAIUsage{InputTokens: c.input + c.cacheRead, CachedInputTokens: c.cacheRead, OutputTokens: c.output})
 			}
 			if got != want || gotOK != wantOK {
 				t.Errorf("%s %+v: entry point = %d, %v; RatesFor math = %d, %v", id, c, got, gotOK, want, wantOK)
@@ -412,7 +412,7 @@ func TestCostMatchesRatesFor(t *testing.T) {
 // corrupt later costs of the same model.
 func TestRatesForReturnsCopies(t *testing.T) {
 	u := ClaudeUsage{InputTokens: 250000} // in sonnet-4-5's premium tier, so tier rats are exercised too
-	before, _ := ClaudeCost("claude-sonnet-4-5", u)
+	before, _ := Cost("claude-sonnet-4-5", u)
 	r, _ := RatesFor("claude-sonnet-4-5")
 	all := []TierRates{r.Base}
 	for _, tier := range r.Tiers {
@@ -425,8 +425,8 @@ func TestRatesForReturnsCopies(t *testing.T) {
 			}
 		}
 	}
-	if after, _ := ClaudeCost("claude-sonnet-4-5", u); after != before {
-		t.Fatalf("mutating RatesFor result changed ClaudeCost: %d -> %d", before, after)
+	if after, _ := Cost("claude-sonnet-4-5", u); after != before {
+		t.Fatalf("mutating RatesFor result changed Cost: %d -> %d", before, after)
 	}
 }
 
@@ -444,20 +444,20 @@ func TestInvalidUsagePanics(t *testing.T) {
 		}()
 		f()
 	}
-	mustPanic("claude negative input", func() { ClaudeCost("claude-opus-4-8", ClaudeUsage{InputTokens: -1}) })
-	mustPanic("claude negative cache read", func() { ClaudeCost("claude-opus-4-8", ClaudeUsage{CacheReadInputTokens: -1}) })
-	mustPanic("claude negative cache write", func() { ClaudeCost("claude-opus-4-8", ClaudeUsage{CacheCreationInputTokens: -1}) })
+	mustPanic("claude negative input", func() { Cost("claude-opus-4-8", ClaudeUsage{InputTokens: -1}) })
+	mustPanic("claude negative cache read", func() { Cost("claude-opus-4-8", ClaudeUsage{CacheReadInputTokens: -1}) })
+	mustPanic("claude negative cache write", func() { Cost("claude-opus-4-8", ClaudeUsage{CacheCreationInputTokens: -1}) })
 	mustPanic("claude negative 1h cache write", func() {
-		ClaudeCost("claude-opus-4-8", ClaudeUsage{CacheCreationInputTokens: 1, CacheCreation1hInputTokens: -1})
+		Cost("claude-opus-4-8", ClaudeUsage{CacheCreationInputTokens: 1, CacheCreation1hInputTokens: -1})
 	})
 	mustPanic("claude 1h writes exceed total writes", func() {
-		ClaudeCost("claude-opus-4-8", ClaudeUsage{CacheCreationInputTokens: 10, CacheCreation1hInputTokens: 11})
+		Cost("claude-opus-4-8", ClaudeUsage{CacheCreationInputTokens: 10, CacheCreation1hInputTokens: 11})
 	})
-	mustPanic("claude negative output", func() { ClaudeCost("claude-opus-4-8", ClaudeUsage{OutputTokens: -1}) })
-	mustPanic("openai negative input", func() { OpenAICost("gpt-5", OpenAIUsage{InputTokens: -1}) })
-	mustPanic("openai negative cached", func() { OpenAICost("gpt-5", OpenAIUsage{CachedInputTokens: -1}) })
-	mustPanic("openai negative output", func() { OpenAICost("gpt-5", OpenAIUsage{OutputTokens: -1}) })
-	mustPanic("openai cached exceeds input", func() { OpenAICost("gpt-5", OpenAIUsage{InputTokens: 10, CachedInputTokens: 11}) })
+	mustPanic("claude negative output", func() { Cost("claude-opus-4-8", ClaudeUsage{OutputTokens: -1}) })
+	mustPanic("openai negative input", func() { Cost("gpt-5", OpenAIUsage{InputTokens: -1}) })
+	mustPanic("openai negative cached", func() { Cost("gpt-5", OpenAIUsage{CachedInputTokens: -1}) })
+	mustPanic("openai negative output", func() { Cost("gpt-5", OpenAIUsage{OutputTokens: -1}) })
+	mustPanic("openai cached exceeds input", func() { Cost("gpt-5", OpenAIUsage{InputTokens: 10, CachedInputTokens: 11}) })
 }
 
 // TestRatParsesDecimalLiteralsExactly encodes the no-float64 requirement:
