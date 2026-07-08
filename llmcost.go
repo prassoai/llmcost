@@ -20,8 +20,8 @@ import (
 //go:embed model_prices_and_context_window.json
 var litellmJSON []byte
 
-// Nls is back's billing unit: 1 nls = 1/100,000 USD (back's protos call the
-// same unit "centimills").
+// Nls is the billing unit: 1 nls = 1/100,000 USD — the unit also known as a
+// centimill.
 type Nls = int64
 
 const nlsPerUSD = 100_000
@@ -116,15 +116,15 @@ type Usage interface {
 	disjoint() components
 }
 
-// Cost prices one response in nls. It normalizes the provider's raw usage
-// into disjoint components, resolves the context-window tier from the total
-// prompt size, computes rate × tokens exactly per component, sums in USD, and
-// ceiling-rounds only the final total — matching back's ceiling convention
-// and guaranteeing that sub-nls token costs accumulate instead of truncating
-// to zero. ok is false if the model is unknown, unpriced, or lacks a rate for
-// a component the usage reports.
+// Cost prices one response in nls. model is the LiteLLM pricing key. Cost
+// normalizes the provider's raw usage into disjoint components, resolves the
+// context-window tier from the total prompt size, computes rate × tokens
+// exactly per component, sums in USD, and ceiling-rounds only the final
+// total, so sub-nls token costs accumulate instead of truncating to zero and
+// any non-zero usage costs at least 1 nls. ok is false if the model is
+// unknown, unpriced, or lacks a rate for a component the usage reports.
 func Cost(model string, u Usage) (Nls, bool) {
-	r, ok := table()[resolve(model)]
+	r, ok := table()[model]
 	if !ok {
 		return 0, false
 	}
@@ -161,11 +161,12 @@ func (u OpenAIUsage) disjoint() components {
 	}
 }
 
-// RatesFor returns the raw per-token rates for model, for callers that want
-// them. ok is false if the model is unknown or has no positive rates. The
-// returned rats are copies; mutating them cannot corrupt the shared table.
+// RatesFor returns the raw per-token rates for model (a LiteLLM pricing
+// key), for callers that want them. ok is false if the model is unknown or
+// has no positive rates. The returned rats are copies; mutating them cannot
+// corrupt the shared table.
 func RatesFor(model string) (Rates, bool) {
-	r, ok := table()[resolve(model)]
+	r, ok := table()[model]
 	if !ok {
 		return Rates{}, false
 	}
@@ -174,15 +175,6 @@ func RatesFor(model string) (Rates, bool) {
 		out.Tiers[i] = Tier{AbovePromptTokens: t.AbovePromptTokens, TierRates: t.clone()}
 	}
 	return out, true
-}
-
-// resolve maps an internal model id to its LiteLLM key; ids not in the alias
-// map are tried as LiteLLM keys directly.
-func resolve(model string) string {
-	if key, ok := aliases[model]; ok {
-		return key
-	}
-	return model
 }
 
 // components are one response's token counts normalized to disjoint billable
@@ -255,9 +247,8 @@ func (t TierRates) clone() TierRates {
 // free and is honored — real free tiers exist (DeepSeek and OpenAI-via-
 // gateway entries list cache writes at 0 because those providers genuinely
 // don't bill them), and LiteLLM's own calculator prices explicit zeros as
-// free. The alias-map gate separately requires strictly positive cache rates
-// for the ids we bill, so a zero sneaking into one of OUR models still fails
-// the sync PR.
+// free. Consumers that need stronger guarantees for the specific models they
+// bill should assert those models' rates via [RatesFor] in their own tests.
 func (t TierRates) priceable() bool {
 	pos := func(r *big.Rat) bool { return r != nil && r.Sign() > 0 }
 	nonneg := func(r *big.Rat) bool { return r == nil || r.Sign() >= 0 }

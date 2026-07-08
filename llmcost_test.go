@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"math/big"
 	"slices"
-	"strings"
 	"testing"
 )
 
@@ -192,9 +191,9 @@ func TestNoCacheRateFallback(t *testing.T) {
 // cache writes at 0 because it genuinely doesn't bill them; gateway-hosted
 // OpenAI entries do the same) and prices as $0, while an ABSENT rate is
 // unpriced and fails — see TestNoCacheRateFallback. Collapsing the two would
-// turn correctly-priced free usage into false failures. The ids in the alias
-// map are held to a stricter bar: TestAliasesResolve requires their cache
-// rates to be strictly positive.
+// turn correctly-priced free usage into false failures. Consumers needing a
+// stricter bar for the models they bill should assert those models' rates in
+// their own tests.
 func TestExplicitZeroCacheRateIsFree(t *testing.T) {
 	r := mustParse(t, `{"input_cost_per_token": 1e-06, "output_cost_per_token": 2e-06, "cache_creation_input_token_cost": 0.0}`)
 	if got, ok := cost(r, components{input: 100, cacheCreation: 5000}); !ok || got != 10 {
@@ -232,8 +231,7 @@ func TestOpenAITierCountsCachedTokens(t *testing.T) {
 }
 
 // TestCeilingRounding encodes the rounding rule: the final total — and only
-// the final total — is ceiling-rounded, matching back's convention of
-// ceiling-rounding its margin'd total. Any non-zero usage costs at least
+// the final total — is ceiling-rounded. Any non-zero usage costs at least
 // 1 nls: a single cache-read token at $3e-7 is 0.03 nls, never free. And
 // sub-nls tokens accumulate exactly: 400 cache reads at 0.03 nls each are
 // exactly 12 nls — per-token flooring would truncate to 0, per-token ceiling
@@ -279,37 +277,6 @@ func TestUnknownModel(t *testing.T) {
 	}
 }
 
-// TestAliasesResolve is the validation gate for the weekly data sync: every
-// internal model id in the alias map must resolve against the vendored
-// LiteLLM data with positive input, cache-read, and output rates — and, for
-// the Anthropic ids, a positive cache-creation rate (Claude bills cache
-// writes; codex/OpenAI models don't report them). If upstream renames or
-// drops a priced model — LiteLLM has shipped a broken cost map before — this
-// test fails the sync PR instead of letting a consumer silently bill zero.
-func TestAliasesResolve(t *testing.T) {
-	for id := range aliases {
-		r, ok := RatesFor(id)
-		if !ok {
-			t.Errorf("alias %q no longer resolves in vendored data", id)
-			continue
-		}
-		if r.Base.Input.Sign() <= 0 || r.Base.Output.Sign() <= 0 {
-			t.Errorf("alias %q has non-positive input/output rates", id)
-		}
-		if r.Base.CacheRead == nil || r.Base.CacheRead.Sign() <= 0 {
-			t.Errorf("alias %q has no positive cache-read rate", id)
-		}
-		if strings.HasPrefix(id, "claude") {
-			if r.Base.CacheCreation == nil || r.Base.CacheCreation.Sign() <= 0 {
-				t.Errorf("claude alias %q has no positive 5m cache-creation rate", id)
-			}
-			if r.Base.CacheCreation1h == nil || r.Base.CacheCreation1h.Sign() <= 0 {
-				t.Errorf("claude alias %q has no positive 1h cache-creation rate", id)
-			}
-		}
-	}
-}
-
 // TestTableInvariants encodes structural guarantees over every parsed model:
 // priceable base rates, tiers strictly ascending with positive thresholds,
 // and priceable tier rates. A violation means parseModel accepted garbage.
@@ -329,12 +296,20 @@ func TestTableInvariants(t *testing.T) {
 	}
 }
 
-// TestTiersParsedFromVendoredData is the long-context canary: the vendored
-// data is known to carry a 200k tier for claude-sonnet-4-5 (the 1M-context
-// beta) and a 272k tier for gpt-5.4. If this fails after a sync, either
-// upstream restructured its tier keys (fix parseModel) or these models'
-// long-context pricing genuinely vanished (verify before merging).
-func TestTiersParsedFromVendoredData(t *testing.T) {
+// TestVendoredDataCanaries pins known shapes of the vendored data: a handful
+// of stable LiteLLM keys must resolve, and the long-context tiers known to
+// exist — claude-sonnet-4-5's 200k (the 1M-context beta) and gpt-5.4's 272k —
+// must be parsed. If this fails after a sync, either upstream restructured
+// its schema (fix parseModel) or the canary models' pricing genuinely
+// vanished (verify before merging). Consumers separately test that every
+// model id THEY bill resolves, so a dropped model they depend on fails their
+// build, not silently bills zero.
+func TestVendoredDataCanaries(t *testing.T) {
+	for _, model := range []string{"claude-opus-4-8", "claude-haiku-4-5", "gpt-5.4", "gpt-4o", "codex-mini-latest"} {
+		if _, ok := RatesFor(model); !ok {
+			t.Errorf("canary %s no longer resolves", model)
+		}
+	}
 	for model, want := range map[string]int64{"claude-sonnet-4-5": 200000, "gpt-5.4": 272000} {
 		r, ok := RatesFor(model)
 		if !ok {
@@ -347,61 +322,32 @@ func TestTiersParsedFromVendoredData(t *testing.T) {
 	}
 }
 
-// TestAliasMapping encodes that aliasing is transparent: an internal id and
-// the LiteLLM key it maps to price identically.
-func TestAliasMapping(t *testing.T) {
-	u := OpenAIUsage{InputTokens: 12345, CachedInputTokens: 678, OutputTokens: 910}
-	got, ok := Cost("codex-mini", u)
-	want, ok2 := Cost("codex-mini-latest", u)
-	if !ok || !ok2 || got != want {
-		t.Fatalf("Cost(codex-mini) = %d, %v; Cost(codex-mini-latest) = %d, %v; want equal and ok", got, ok, want, ok2)
-	}
-}
-
-// TestDirectLiteLLMKey encodes that ids outside the alias map fall through to
-// direct LiteLLM key lookup, so gateways can price arbitrary upstream models.
-func TestDirectLiteLLMKey(t *testing.T) {
-	if _, inAliases := aliases["gpt-4o"]; inAliases {
-		t.Fatal("gpt-4o joined the alias map; pick a different direct key for this test")
-	}
-	if _, ok := Cost("gpt-4o", OpenAIUsage{InputTokens: 1}); !ok {
-		t.Fatal("Cost(gpt-4o) did not resolve via direct LiteLLM key lookup")
-	}
-}
-
 // TestCostMatchesRatesFor encodes that the exported views never disagree:
-// the entry points price exactly what RatesFor-derived math predicts, for
-// every alias, including across the tier boundary.
+// Cost prices exactly what RatesFor-derived math predicts — for EVERY model
+// in the table, through both usage shapes, including across tier boundaries
+// and on models that fail (unpriced components must fail identically).
 func TestCostMatchesRatesFor(t *testing.T) {
-	for id := range aliases {
-		r, ok := RatesFor(id)
-		if !ok {
-			continue // TestAliasesResolve reports this
-		}
-		claude := strings.HasPrefix(id, "claude")
+	for model, r := range table() {
 		for _, c := range []components{
-			{input: 3117, cacheRead: 41775, output: 977},
+			{input: 3117, cacheRead: 41775, cacheCreation: 2048, cacheCreation1h: 512, output: 977},
 			{input: 300000, cacheRead: 41775, output: 977}, // above any 200k/272k tier
 		} {
-			if claude {
-				c.cacheCreation, c.cacheCreation1h = 2048, 512 // exercise both write TTLs
-			}
 			want, wantOK := cost(r, c)
-			var got Nls
-			var gotOK bool
-			if claude {
-				got, gotOK = Cost(id, ClaudeUsage{
-					InputTokens:                c.input,
-					CacheReadInputTokens:       c.cacheRead,
-					CacheCreationInputTokens:   c.cacheCreation + c.cacheCreation1h, // raw API total
-					CacheCreation1hInputTokens: c.cacheCreation1h,
-					OutputTokens:               c.output,
-				})
-			} else {
-				got, gotOK = Cost(id, OpenAIUsage{InputTokens: c.input + c.cacheRead, CachedInputTokens: c.cacheRead, OutputTokens: c.output})
-			}
+			got, gotOK := Cost(model, ClaudeUsage{
+				InputTokens:                c.input,
+				CacheReadInputTokens:       c.cacheRead,
+				CacheCreationInputTokens:   c.cacheCreation + c.cacheCreation1h, // raw API total
+				CacheCreation1hInputTokens: c.cacheCreation1h,
+				OutputTokens:               c.output,
+			})
 			if got != want || gotOK != wantOK {
-				t.Errorf("%s %+v: entry point = %d, %v; RatesFor math = %d, %v", id, c, got, gotOK, want, wantOK)
+				t.Errorf("%s %+v: Cost = %d, %v; RatesFor math = %d, %v", model, c, got, gotOK, want, wantOK)
+			}
+			if c.cacheCreation == 0 && c.cacheCreation1h == 0 {
+				gotOA, okOA := Cost(model, OpenAIUsage{InputTokens: c.input + c.cacheRead, CachedInputTokens: c.cacheRead, OutputTokens: c.output})
+				if gotOA != want || okOA != wantOK {
+					t.Errorf("%s %+v: Cost(OpenAIUsage) = %d, %v; RatesFor math = %d, %v", model, c, gotOA, okOA, want, wantOK)
+				}
 			}
 		}
 	}
