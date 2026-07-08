@@ -20,10 +20,11 @@
 // Anthropic reports disjoint counts — input_tokens EXCLUDES cache activity:
 //
 //	llmcost.ClaudeCost("claude-opus-4-8", llmcost.ClaudeUsage{
-//		InputTokens:              u.InputTokens,              // uncached input only
-//		CacheReadInputTokens:     u.CacheReadInputTokens,     // billed at the cache-read rate
-//		CacheCreationInputTokens: u.CacheCreationInputTokens, // billed at the cache-write rate
-//		OutputTokens:             u.OutputTokens,
+//		InputTokens:                u.InputTokens,          // uncached input only
+//		CacheReadInputTokens:       u.CacheReadInputTokens, // billed at the cache-read rate
+//		CacheCreationInputTokens:   u.CacheCreationInputTokens, // TOTAL cache writes, both TTLs
+//		CacheCreation1hInputTokens: u.CacheCreation.Ephemeral1hInputTokens, // the 1h-TTL subset
+//		OutputTokens:               u.OutputTokens,
 //	})
 //
 // OpenAI reports overlapping counts — input_tokens INCLUDES cached_tokens:
@@ -42,13 +43,14 @@
 //
 // # Cache pricing
 //
-// Cache reads bill at the model's cache_read_input_token_cost and cache
-// writes at its cache_creation_input_token_cost — the providers' real rates
-// (Anthropic: 0.1× and 1.25× the input rate respectively; OpenAI bills reads
-// only). There is deliberately NO fallback: a model without a cache rate
-// fails to price usage that reports those tokens. Anthropic's 1-hour-TTL
-// write premium (2×) is out of scope — callers report one cache-write count,
-// billed at the default 5-minute rate.
+// Cache reads bill at the model's cache_read_input_token_cost. Cache writes
+// bill by TTL: the 1-hour subset of ClaudeUsage.CacheCreationInputTokens at
+// cache_creation_input_token_cost_above_1hr (2× input) and the 5-minute
+// remainder at cache_creation_input_token_cost (1.25× input). OpenAI bills
+// reads only. These are the providers' real rates, and there is deliberately
+// NO fallback in any direction: a model without a rate for a component —
+// including a 5m-only model handed 1h writes — fails to price usage that
+// reports those tokens.
 //
 // # Context-window tiers
 //

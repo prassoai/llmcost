@@ -17,10 +17,11 @@ inside. Never pre-subtract, never mix shapes.
 
 ```go
 cost, ok := llmcost.ClaudeCost("claude-opus-4-8", llmcost.ClaudeUsage{
-    InputTokens:              1200,  // usage.input_tokens — uncached input only
-    CacheReadInputTokens:     45000, // usage.cache_read_input_tokens
-    CacheCreationInputTokens: 3000,  // usage.cache_creation_input_tokens
-    OutputTokens:             800,   // usage.output_tokens
+    InputTokens:                1200,  // usage.input_tokens — uncached input only
+    CacheReadInputTokens:       45000, // usage.cache_read_input_tokens
+    CacheCreationInputTokens:   3000,  // usage.cache_creation_input_tokens — TOTAL writes, both TTLs
+    CacheCreation1hInputTokens: 1000,  // usage.cache_creation.ephemeral_1h_input_tokens — 1h subset
+    OutputTokens:               800,   // usage.output_tokens
 })
 ```
 
@@ -40,12 +41,12 @@ on a component the model has no rate for. Nothing silently bills zero.
 ## Semantics
 
 - **Real cache rates, no fallback.** Cache reads bill at the model's
-  `cache_read_input_token_cost`, cache writes at its
-  `cache_creation_input_token_cost` (Anthropic: 0.1× and 1.25× input;
-  OpenAI reports reads only). A model missing a cache rate *fails* to price
-  usage reporting those tokens — it is never approximated at the input rate.
-  Anthropic's 1-hour-TTL write premium is out of scope (single write count,
-  billed at the 5-minute rate).
+  `cache_read_input_token_cost` (0.1× input for Anthropic; OpenAI reports
+  reads only). Cache writes bill **by TTL**: the 1-hour subset at
+  `cache_creation_input_token_cost_above_1hr` (2× input) and the 5-minute
+  remainder at `cache_creation_input_token_cost` (1.25× input) — the 1h rate
+  participates in context-window tiers too. A model missing a rate for a
+  reported component *fails* to price — never approximated at another rate.
 - **Context-window tiers.** Models with LiteLLM `*_above_Xk_tokens` pricing
   (Anthropic's 1M-context beta >200k, GPT-5.4/5.5 >272k, Gemini >200k) are
   tiered on the request's **total prompt size** (uncached + cache reads +

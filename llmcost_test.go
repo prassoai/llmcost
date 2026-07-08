@@ -13,18 +13,20 @@ import (
 // must never turn these red. Values are the providers' published prices.
 
 // sonnet45Spec mirrors claude-sonnet-4-5: $3/M input, $0.30/M cache read,
-// $3.75/M cache write (1.25×), $15/M output, with the 1M-context-beta premium
-// tier above 200k prompt tokens ($6 / $0.60 / $7.50 / $22.50).
+// $3.75/M 5-minute cache write (1.25×), $6/M 1-hour cache write (2×), $15/M
+// output, with the 1M-context-beta premium tier above 200k prompt tokens
+// ($6 / $0.60 / $7.50 / $12 / $22.50).
 const sonnet45Spec = `{
 	"input_cost_per_token": 3e-06,
 	"cache_read_input_token_cost": 3e-07,
 	"cache_creation_input_token_cost": 3.75e-06,
+	"cache_creation_input_token_cost_above_1hr": 6e-06,
 	"output_cost_per_token": 1.5e-05,
 	"input_cost_per_token_above_200k_tokens": 6e-06,
 	"cache_read_input_token_cost_above_200k_tokens": 6e-07,
 	"cache_creation_input_token_cost_above_200k_tokens": 7.5e-06,
+	"cache_creation_input_token_cost_above_1hr_above_200k_tokens": 1.2e-05,
 	"output_cost_per_token_above_200k_tokens": 2.25e-05,
-	"cache_creation_input_token_cost_above_1hr": 6e-06,
 	"litellm_provider": "anthropic"
 }`
 
@@ -126,6 +128,36 @@ func TestTierOnlyCacheCreation(t *testing.T) {
 	}
 }
 
+// TestCacheWriteTTLSplit encodes that cache writes price by TTL: the 1-hour
+// subset bills at the 1h rate (2× input) and the remainder at the 5-minute
+// rate (1.25× input). 1500 5m-writes ×3.75e-6 + 500 1h-writes ×6e-6 =
+// $0.008625 = exactly 862.5 nls → ceil 863; billing all 2000 at the 5m rate
+// would give 750, at the 1h rate 1200. ClaudeCost takes the API's raw shape —
+// total writes plus the 1h subset — and splits internally.
+func TestCacheWriteTTLSplit(t *testing.T) {
+	got, ok := cost(mustParse(t, sonnet45Spec), components{cacheCreation: 1500, cacheCreation1h: 500})
+	if !ok || got != 863 {
+		t.Fatalf("cost = %d, %v; want 863, true", got, ok)
+	}
+	viaAPI, ok2 := ClaudeCost("claude-sonnet-4-5", ClaudeUsage{CacheCreationInputTokens: 2000, CacheCreation1hInputTokens: 500})
+	direct, ok3 := cost(table()["claude-sonnet-4-5"], components{cacheCreation: 1500, cacheCreation1h: 500})
+	if !ok2 || !ok3 || viaAPI != direct {
+		t.Fatalf("ClaudeCost = %d, %v; internal = %d, %v; want equal and ok", viaAPI, ok2, direct, ok3)
+	}
+}
+
+// TestCacheWrite1hTiered encodes that the 1-hour write rate participates in
+// context-window tiers (cache_creation_input_token_cost_above_1hr_above_200k_tokens),
+// and that 1h writes count toward the tier threshold: 200001 1h-write tokens
+// alone exceed 200k, so the whole request bills at the tiered 1h rate.
+// 200001×1.2e-5 = $2.400012 → 240001.2 nls → ceil 240002.
+func TestCacheWrite1hTiered(t *testing.T) {
+	got, ok := cost(mustParse(t, sonnet45Spec), components{cacheCreation1h: 200001})
+	if !ok || got != 240002 {
+		t.Fatalf("cost = %d, %v; want 240002, true", got, ok)
+	}
+}
+
 // TestNoCacheRateFallback encodes the no-silent-fallback requirement: a model
 // without a cache-read (or cache-creation) rate must FAIL when usage reports
 // those tokens — never bill them at the full input rate, never bill zero.
@@ -137,6 +169,14 @@ func TestNoCacheRateFallback(t *testing.T) {
 	}
 	if _, ok := cost(r, components{input: 100, cacheCreation: 1}); ok {
 		t.Fatal("cache writes priced despite model having no cache-creation rate")
+	}
+	if _, ok := cost(r, components{input: 100, cacheCreation1h: 1}); ok {
+		t.Fatal("1h cache writes priced despite model having no 1h cache-creation rate")
+	}
+	// A model priced only for 5m writes must not bill 1h writes at the 5m rate.
+	fiveMinOnly := mustParse(t, `{"input_cost_per_token": 1e-06, "cache_creation_input_token_cost": 1.25e-06, "output_cost_per_token": 2e-06}`)
+	if _, ok := cost(fiveMinOnly, components{cacheCreation1h: 1}); ok {
+		t.Fatal("1h cache writes priced despite model having only a 5m cache-creation rate")
 	}
 	if got, ok := cost(r, components{input: 100}); !ok || got != 10 {
 		t.Fatalf("cost without cache usage = %d, %v; want 10, true", got, ok)
@@ -244,8 +284,13 @@ func TestAliasesResolve(t *testing.T) {
 		if r.Base.CacheRead == nil || r.Base.CacheRead.Sign() <= 0 {
 			t.Errorf("alias %q has no positive cache-read rate", id)
 		}
-		if strings.HasPrefix(id, "claude") && (r.Base.CacheCreation == nil || r.Base.CacheCreation.Sign() <= 0) {
-			t.Errorf("claude alias %q has no positive cache-creation rate", id)
+		if strings.HasPrefix(id, "claude") {
+			if r.Base.CacheCreation == nil || r.Base.CacheCreation.Sign() <= 0 {
+				t.Errorf("claude alias %q has no positive 5m cache-creation rate", id)
+			}
+			if r.Base.CacheCreation1h == nil || r.Base.CacheCreation1h.Sign() <= 0 {
+				t.Errorf("claude alias %q has no positive 1h cache-creation rate", id)
+			}
 		}
 	}
 }
@@ -318,15 +363,25 @@ func TestCostMatchesRatesFor(t *testing.T) {
 		if !ok {
 			continue // TestAliasesResolve reports this
 		}
+		claude := strings.HasPrefix(id, "claude")
 		for _, c := range []components{
 			{input: 3117, cacheRead: 41775, output: 977},
 			{input: 300000, cacheRead: 41775, output: 977}, // above any 200k/272k tier
 		} {
+			if claude {
+				c.cacheCreation, c.cacheCreation1h = 2048, 512 // exercise both write TTLs
+			}
 			want, wantOK := cost(r, c)
 			var got Nls
 			var gotOK bool
-			if strings.HasPrefix(id, "claude") {
-				got, gotOK = ClaudeCost(id, ClaudeUsage{InputTokens: c.input, CacheReadInputTokens: c.cacheRead, OutputTokens: c.output})
+			if claude {
+				got, gotOK = ClaudeCost(id, ClaudeUsage{
+					InputTokens:                c.input,
+					CacheReadInputTokens:       c.cacheRead,
+					CacheCreationInputTokens:   c.cacheCreation + c.cacheCreation1h, // raw API total
+					CacheCreation1hInputTokens: c.cacheCreation1h,
+					OutputTokens:               c.output,
+				})
 			} else {
 				got, gotOK = OpenAICost(id, OpenAIUsage{InputTokens: c.input + c.cacheRead, CachedInputTokens: c.cacheRead, OutputTokens: c.output})
 			}
@@ -349,7 +404,7 @@ func TestRatesForReturnsCopies(t *testing.T) {
 		all = append(all, tier.TierRates)
 	}
 	for _, tr := range all {
-		for _, rat := range []*big.Rat{tr.Input, tr.CacheRead, tr.CacheCreation, tr.Output} {
+		for _, rat := range []*big.Rat{tr.Input, tr.CacheRead, tr.CacheCreation, tr.CacheCreation1h, tr.Output} {
 			if rat != nil {
 				rat.SetInt64(999)
 			}
@@ -377,6 +432,12 @@ func TestInvalidUsagePanics(t *testing.T) {
 	mustPanic("claude negative input", func() { ClaudeCost("claude-opus-4-8", ClaudeUsage{InputTokens: -1}) })
 	mustPanic("claude negative cache read", func() { ClaudeCost("claude-opus-4-8", ClaudeUsage{CacheReadInputTokens: -1}) })
 	mustPanic("claude negative cache write", func() { ClaudeCost("claude-opus-4-8", ClaudeUsage{CacheCreationInputTokens: -1}) })
+	mustPanic("claude negative 1h cache write", func() {
+		ClaudeCost("claude-opus-4-8", ClaudeUsage{CacheCreationInputTokens: 1, CacheCreation1hInputTokens: -1})
+	})
+	mustPanic("claude 1h writes exceed total writes", func() {
+		ClaudeCost("claude-opus-4-8", ClaudeUsage{CacheCreationInputTokens: 10, CacheCreation1hInputTokens: 11})
+	})
 	mustPanic("claude negative output", func() { ClaudeCost("claude-opus-4-8", ClaudeUsage{OutputTokens: -1}) })
 	mustPanic("openai negative input", func() { OpenAICost("gpt-5", OpenAIUsage{InputTokens: -1}) })
 	mustPanic("openai negative cached", func() { OpenAICost("gpt-5", OpenAIUsage{CachedInputTokens: -1}) })

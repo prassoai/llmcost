@@ -27,25 +27,31 @@ type Nls = int64
 const nlsPerUSD = 100_000
 
 // ClaudeUsage holds the RAW token counts of one Anthropic API response, named
-// after the API's usage fields. Anthropic reports DISJOINT counts:
+// after the API's usage fields. Anthropic reports input/cache-read/output as
+// DISJOINT counts:
 //
-//	InputTokens              = usage.input_tokens               — uncached input ONLY, excludes both cache fields
-//	CacheReadInputTokens     = usage.cache_read_input_tokens    — cache hits, billed at the cache-read rate (0.1× input)
-//	CacheCreationInputTokens = usage.cache_creation_input_tokens — cache writes, billed at the cache-write rate (1.25× input)
-//	OutputTokens             = usage.output_tokens
+//	InputTokens                = usage.input_tokens                — uncached input ONLY, excludes both cache fields
+//	CacheReadInputTokens       = usage.cache_read_input_tokens     — cache hits, billed at the cache-read rate (0.1× input)
+//	CacheCreationInputTokens   = usage.cache_creation_input_tokens — TOTAL cache writes across both TTLs
+//	CacheCreation1hInputTokens = usage.cache_creation.ephemeral_1h_input_tokens — the 1-hour-TTL SUBSET of the total
+//	OutputTokens               = usage.output_tokens
 //
-// Copy the four fields straight from the response; no arithmetic is needed or
-// wanted. The request's total prompt size — which decides context-window
-// pricing tiers — is the sum of the three input fields, computed internally.
-//
-// Anthropic's 1-hour-TTL cache writes (2× input) are out of scope: callers
-// report a single cache-write count, and it bills at the default 5-minute
-// rate.
+// Copy the fields straight from the response; no arithmetic is needed or
+// wanted. Cache writes are priced by TTL: the 1h subset bills at the model's
+// 1-hour cache-write rate (2× input) and the remainder — the API's
+// ephemeral_5m_input_tokens, computed internally as total minus 1h — at the
+// default 5-minute rate (1.25× input). A response without the cache_creation
+// breakdown leaves CacheCreation1hInputTokens zero and all writes bill at the
+// 5-minute rate. CacheCreation1hInputTokens > CacheCreationInputTokens is
+// impossible in a real response and panics. The request's total prompt size —
+// which decides context-window pricing tiers — is InputTokens +
+// CacheReadInputTokens + CacheCreationInputTokens, computed internally.
 type ClaudeUsage struct {
-	InputTokens              int64
-	CacheReadInputTokens     int64
-	CacheCreationInputTokens int64
-	OutputTokens             int64
+	InputTokens                int64
+	CacheReadInputTokens       int64
+	CacheCreationInputTokens   int64
+	CacheCreation1hInputTokens int64
+	OutputTokens               int64
 }
 
 // OpenAIUsage holds the RAW token counts of one OpenAI API response, named
@@ -67,12 +73,15 @@ type OpenAIUsage struct {
 	OutputTokens      int64
 }
 
-// TierRates are exact USD-per-token prices for the four billable components.
-// A nil rate means the provider does not price that component (e.g. OpenAI
-// models have no CacheCreation); costing usage with a positive count on a nil
-// component fails rather than billing zero.
+// TierRates are exact USD-per-token prices for the five billable components.
+// CacheCreation is the default 5-minute-TTL cache-write rate
+// (cache_creation_input_token_cost); CacheCreation1h is the 1-hour-TTL rate
+// (cache_creation_input_token_cost_above_1hr). A nil rate means the provider
+// does not price that component (e.g. OpenAI models have no cache-write
+// rates); costing usage with a positive count on a nil component fails rather
+// than billing zero.
 type TierRates struct {
-	Input, CacheRead, CacheCreation, Output *big.Rat
+	Input, CacheRead, CacheCreation, CacheCreation1h, Output *big.Rat
 }
 
 // Tier is a context-window pricing tier: when a request's total prompt tokens
@@ -103,18 +112,22 @@ type Rates struct {
 // unknown, unpriced, or lacks a rate for a component the usage reports.
 // Negative counts are a caller bug and panic.
 func ClaudeCost(model string, u ClaudeUsage) (Nls, bool) {
-	if u.InputTokens < 0 || u.CacheReadInputTokens < 0 || u.CacheCreationInputTokens < 0 || u.OutputTokens < 0 {
+	if u.InputTokens < 0 || u.CacheReadInputTokens < 0 || u.CacheCreationInputTokens < 0 || u.CacheCreation1hInputTokens < 0 || u.OutputTokens < 0 {
 		panic(fmt.Sprintf("llmcost: negative token counts: %+v", u))
+	}
+	if u.CacheCreation1hInputTokens > u.CacheCreationInputTokens {
+		panic(fmt.Sprintf("llmcost: CacheCreation1hInputTokens exceeds CacheCreationInputTokens (the 1h count is a subset of the total): %+v", u))
 	}
 	r, ok := table()[resolve(model)]
 	if !ok {
 		return 0, false
 	}
 	return cost(r, components{
-		input:         u.InputTokens,
-		cacheRead:     u.CacheReadInputTokens,
-		cacheCreation: u.CacheCreationInputTokens,
-		output:        u.OutputTokens,
+		input:           u.InputTokens,
+		cacheRead:       u.CacheReadInputTokens,
+		cacheCreation:   u.CacheCreationInputTokens - u.CacheCreation1hInputTokens,
+		cacheCreation1h: u.CacheCreation1hInputTokens,
+		output:          u.OutputTokens,
 	})
 }
 
@@ -169,16 +182,17 @@ func resolve(model string) string {
 }
 
 // components are one response's token counts normalized to disjoint billable
-// parts: input is UNCACHED input only.
+// parts: input is UNCACHED input only, cacheCreation is 5-minute-TTL writes
+// only (the 1h subset already split out into cacheCreation1h).
 type components struct {
-	input, cacheRead, cacheCreation, output int64
+	input, cacheRead, cacheCreation, cacheCreation1h, output int64
 }
 
 // promptTokens is the request's total prompt size — the context-window tier
 // discriminator. Both providers gate long-context pricing on total input
-// including cached tokens.
+// including cached tokens, whatever their TTL.
 func (c components) promptTokens() int64 {
-	return c.input + c.cacheRead + c.cacheCreation
+	return c.input + c.cacheRead + c.cacheCreation + c.cacheCreation1h
 }
 
 // cost is the pure core: resolve the tier from total prompt size, then
@@ -195,6 +209,7 @@ func cost(r Rates, c components) (Nls, bool) {
 		{t.Input, c.input},
 		{t.CacheRead, c.cacheRead},
 		{t.CacheCreation, c.cacheCreation},
+		{t.CacheCreation1h, c.cacheCreation1h},
 		{t.Output, c.output},
 	} {
 		if part.tokens == 0 {
@@ -226,7 +241,7 @@ func (t TierRates) clone() TierRates {
 		}
 		return new(big.Rat).Set(r)
 	}
-	return TierRates{Input: cp(t.Input), CacheRead: cp(t.CacheRead), CacheCreation: cp(t.CacheCreation), Output: cp(t.Output)}
+	return TierRates{Input: cp(t.Input), CacheRead: cp(t.CacheRead), CacheCreation: cp(t.CacheCreation), CacheCreation1h: cp(t.CacheCreation1h), Output: cp(t.Output)}
 }
 
 // priceable reports whether a component set can bill: positive input and
@@ -235,7 +250,7 @@ func (t TierRates) clone() TierRates {
 func (t TierRates) priceable() bool {
 	pos := func(r *big.Rat) bool { return r != nil && r.Sign() > 0 }
 	nonneg := func(r *big.Rat) bool { return r == nil || r.Sign() >= 0 }
-	return pos(t.Input) && pos(t.Output) && nonneg(t.CacheRead) && nonneg(t.CacheCreation)
+	return pos(t.Input) && pos(t.Output) && nonneg(t.CacheRead) && nonneg(t.CacheCreation) && nonneg(t.CacheCreation1h)
 }
 
 // ceilNls converts a non-negative exact USD amount to nls, rounding up.
@@ -298,7 +313,9 @@ func parseModel(spec json.RawMessage) (Rates, bool) {
 			Input:         or(ratField(fields, "input_cost_per_token"+suffix), base.Input),
 			CacheRead:     or(ratField(fields, "cache_read_input_token_cost"+suffix), base.CacheRead),
 			CacheCreation: or(ratField(fields, "cache_creation_input_token_cost"+suffix), base.CacheCreation),
-			Output:        or(ratField(fields, "output_cost_per_token"+suffix), base.Output),
+			// The 1h write rate tiers too: cache_creation_input_token_cost_above_1hr_above_200k_tokens.
+			CacheCreation1h: or(ratField(fields, "cache_creation_input_token_cost_above_1hr"+suffix), base.CacheCreation1h),
+			Output:          or(ratField(fields, "output_cost_per_token"+suffix), base.Output),
 		}
 	}
 	r := Rates{Base: rates("", TierRates{})}
