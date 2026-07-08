@@ -29,9 +29,13 @@ jobs:
       # rates in the vendored LiteLLM data.
       - name: go test
         run: go test ./...
+      # Fetched via the authenticated API, not raw.githubusercontent.com —
+      # anonymous raw fetches get 429-rate-limited from shared runner IPs.
       - name: embedded data matches VENDORED_FROM pin
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           sha=$(sed -n 's/^commit: //p' VENDORED_FROM)
-          curl -fsSL -o /tmp/upstream.json \
-            "https://raw.githubusercontent.com/BerriAI/litellm/${sha}/model_prices_and_context_window.json"
+          gh api -H "Accept: application/vnd.github.raw" \
+            "repos/BerriAI/litellm/contents/model_prices_and_context_window.json?ref=${sha}" > /tmp/upstream.json
           cmp /tmp/upstream.json model_prices_and_context_window.json

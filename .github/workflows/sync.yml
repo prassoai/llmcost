@@ -27,12 +27,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Fetched via the authenticated API, not raw.githubusercontent.com —
+      # anonymous fetches get 429-rate-limited from shared runner IPs.
       - name: fetch upstream at pinned-to-be commit
         id: fetch
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          sha=$(curl -fsSL https://api.github.com/repos/BerriAI/litellm/commits/main | jq -r .sha)
-          curl -fsSL -o /tmp/upstream.json \
-            "https://raw.githubusercontent.com/BerriAI/litellm/${sha}/model_prices_and_context_window.json"
+          sha=$(gh api repos/BerriAI/litellm/commits/main --jq .sha)
+          gh api -H "Accept: application/vnd.github.raw" \
+            "repos/BerriAI/litellm/contents/model_prices_and_context_window.json?ref=${sha}" > /tmp/upstream.json
           jq -e 'type == "object"' /tmp/upstream.json > /dev/null # schema parse: must be a JSON object
           if cmp -s /tmp/upstream.json model_prices_and_context_window.json; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
