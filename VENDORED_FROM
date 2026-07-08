@@ -1,0 +1,8 @@
+# model_prices_and_context_window.json is vendored byte-identical from
+# BerriAI/litellm (MIT — see THIRD_PARTY_LICENSES) at the commit below.
+# Re-vendor: update the SHA, then
+#   curl -fsSL -o model_prices_and_context_window.json \
+#     "https://raw.githubusercontent.com/BerriAI/litellm/<sha>/model_prices_and_context_window.json"
+# and run go test ./... (the validation gate). The weekly sync workflow
+# (.github/workflows/sync.yml) does this automatically.
+commit: 999637883ce34d3944c614f38f32cfbe0bc9062d

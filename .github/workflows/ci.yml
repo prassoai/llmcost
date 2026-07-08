@@ -1,0 +1,37 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - name: go vet
+        run: go vet ./...
+      - name: staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          staticcheck ./...
+      # go test includes TestAliasesResolve, the validation gate for data
+      # syncs: it fails if any aliased model no longer resolves to non-zero
+      # rates in the vendored LiteLLM data.
+      - name: go test
+        run: go test ./...
+      - name: embedded data matches VENDORED_FROM pin
+        run: |
+          sha=$(sed -n 's/^commit: //p' VENDORED_FROM)
+          curl -fsSL -o /tmp/upstream.json \
+            "https://raw.githubusercontent.com/BerriAI/litellm/${sha}/model_prices_and_context_window.json"
+          cmp /tmp/upstream.json model_prices_and_context_window.json
