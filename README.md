@@ -38,6 +38,30 @@ cost, ok := llmcost.Cost("gpt-5.4", llmcost.OpenAIUsage{
 `ok` is false whenever the response can't be priced — unknown model, or usage
 on a component the model has no rate for. Nothing silently bills zero.
 
+## Service tiers — flex and priority
+
+OpenAI bills the same request differently by processing tier: **flex**
+(cheaper, slower) and **priority** (pricier, faster) publish their own rates
+(LiteLLM's `*_flex` / `*_priority` variants). `CostTier` selects one;
+`Cost` is exactly the standard-tier view.
+
+```go
+cost, ok := llmcost.CostTier("gpt-5.5", llmcost.TierFlex, llmcost.OpenAIUsage{
+    InputTokens:       46200,
+    CachedInputTokens: 45000,
+    OutputTokens:      800,
+})
+```
+
+The no-fallback rule extends across tiers: a model without rates at the
+requested tier (gpt-5.3-codex has no flex), a tier missing a component the
+usage reports, or a tier string that isn't one of `TierStandard` /
+`TierFlex` / `TierPriority` all return `ok=false` — flex/priority usage is
+never silently billed at standard rates (~2× off either way). Priority has
+its own context-window tiers (`*_above_Xk_tokens_priority`), resolved with
+the same semantics. LiteLLM's `*_batches` variants (Batch API) are not
+modeled.
+
 ## Semantics
 
 - **Real cache rates, no fallback.** Cache reads bill at the model's
@@ -53,7 +77,8 @@ on a component the model has no rate for. Nothing silently bills zero.
   cache writes; strict `>`), and once over the threshold the **entire
   request** bills at the tier's rates — not just the excess. Verified against
   LiteLLM's own cost calculator and the providers' billing. Untiered
-  components inherit base rates; OpenAI priority/flex tiers are out of scope.
+  components inherit the priced service tier's base rates — never another
+  service tier's.
 - **Exact math, ceiling at the total.** Rates parse from decimal literals
   into `math/big.Rat` — never through float64. The response is priced exactly
   in USD and converted to nls only at the final total, **ceiling-rounded**.
@@ -64,8 +89,9 @@ on a component the model has no rate for. Nothing silently bills zero.
   id it bills resolves here (`RatesFor`) — that test is the consumer's
   guarantee that a data sync can't silently drop a model it depends on.
 
-`RatesFor(model)` exposes the raw per-token rates — base and tiers — for
-callers that want them. See `doc.go` for the full contract.
+`RatesFor(model)` / `RatesForTier(model, tier)` expose the raw per-token
+rates — base and tiers — for callers that want them. See `doc.go` for the
+full contract.
 
 ## Vendored data
 

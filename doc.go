@@ -39,6 +39,28 @@
 // component's rate. [RatesFor] exposes the raw per-token rates (base and
 // tiers) for callers that want them.
 //
+// # Service tiers
+//
+// OpenAI bills the same request differently by processing tier: flex
+// (cheaper, slower) and priority (pricier, faster) publish their own
+// per-token rates, carried in LiteLLM's data as *_flex and *_priority field
+// variants. [CostTier] and [RatesForTier] select a [ServiceTier]; [Cost] and
+// [RatesFor] are exactly the [TierStandard] views.
+//
+//	llmcost.CostTier("gpt-5.5", llmcost.TierFlex, llmcost.OpenAIUsage{...})
+//
+// The no-fallback rule extends across tiers: a model without priceable rates
+// at the requested tier (e.g. gpt-5.3-codex has no flex rates), a tier
+// missing a rate for a component the usage reports, or a tier string that is
+// not one of the constants — including "" — all return ok=false. Flex or
+// priority usage is never billed at standard rates; that would be a ~2×
+// error in either direction. Context-window tiers exist within a service
+// tier (*_above_Xk_tokens_priority) and resolve there with the same
+// semantics, inheriting that service tier's base rates. Standard rates
+// anchor table membership: a model without them does not resolve at any
+// tier. LiteLLM's *_batches variants price the Batch API, not a per-request
+// service tier, and are not modeled.
+//
 // # Cache pricing
 //
 // Cache reads bill at the model's cache_read_input_token_cost. Cache writes
@@ -60,8 +82,8 @@
 // for OpenAI that is exactly the reported InputTokens), the threshold is
 // strict (>, not >=), and once exceeded the ENTIRE request — every input,
 // cache, and output token — bills at the tier's rates, not just the excess.
-// A component upstream leaves untiered inherits its base rate. OpenAI's
-// priority/flex service tiers are out of scope (standard tier only).
+// A component upstream leaves untiered inherits its base rate — the base of
+// the service tier being priced, never another service tier's.
 //
 // # Precision and rounding
 //

@@ -26,6 +26,24 @@ type Nls = int64
 
 const nlsPerUSD = 100_000
 
+// ServiceTier selects which of a model's per-request rate variants price a
+// response. OpenAI bills the same request differently by processing tier:
+// flex (cheaper, slower) and priority (pricier, faster) each publish their
+// own per-token rates, carried in LiteLLM's data as *_flex and *_priority
+// field variants. Only the three constants below resolve — an unknown or
+// empty tier is unpriced (ok=false), never a silent standard fallback — and
+// there is no cross-tier fallback: a model without rates at the requested
+// tier fails rather than billing another tier's rates (a ~2× error in
+// either direction). LiteLLM's *_batches variants (Batch API) are not
+// service tiers and are not modeled.
+type ServiceTier string
+
+const (
+	TierStandard ServiceTier = "standard"
+	TierFlex     ServiceTier = "flex"     // LiteLLM's *_flex fields
+	TierPriority ServiceTier = "priority" // LiteLLM's *_priority fields
+)
+
 // ClaudeUsage holds the RAW token counts of one Anthropic API response, named
 // after the API's usage fields. Anthropic reports input/cache-read/output as
 // DISJOINT counts:
@@ -116,16 +134,28 @@ type Usage interface {
 	disjoint() components
 }
 
-// Cost prices one response in nls. model is the LiteLLM pricing key. Cost
-// normalizes the provider's raw usage into disjoint components, resolves the
-// context-window tier from the total prompt size, computes rate × tokens
-// exactly per component, sums in USD, and ceiling-rounds only the final
-// total, so sub-nls token costs accumulate instead of truncating to zero and
-// any non-zero usage costs at least 1 nls. ok is false if the model is
-// unknown, unpriced, or lacks a rate for a component the usage reports.
+// Cost prices one response in nls at the standard service tier. model is
+// the LiteLLM pricing key. Cost normalizes the provider's raw usage into
+// disjoint components, resolves the context-window tier from the total
+// prompt size, computes rate × tokens exactly per component, sums in USD,
+// and ceiling-rounds only the final total, so sub-nls token costs
+// accumulate instead of truncating to zero and any non-zero usage costs at
+// least 1 nls. ok is false if the model is unknown, unpriced, or lacks a
+// rate for a component the usage reports.
 func Cost(model string, u Usage) (Nls, bool) {
-	c := u.disjoint() // before the lookup: impossible counts panic even for unknown models
-	r, ok := table()[model]
+	return CostTier(model, TierStandard, u)
+}
+
+// CostTier prices one response in nls at a service tier, with the same
+// semantics as [Cost] applied to the tier's own rates: the context-window
+// tier is resolved within the service tier, and ok is false if the model is
+// unknown, the model has no priceable rates at that tier (e.g. a model
+// LiteLLM lists no *_flex fields for), the tier is not one of the
+// [ServiceTier] constants, or the tier lacks a rate for a component the
+// usage reports. There is deliberately no fallback to another tier's rates.
+func CostTier(model string, tier ServiceTier, u Usage) (Nls, bool) {
+	c := u.disjoint() // before the lookup: impossible counts panic even for unknown models and tiers
+	r, ok := table()[model][tier]
 	if !ok {
 		return 0, false
 	}
@@ -162,12 +192,20 @@ func (u OpenAIUsage) disjoint() components {
 	}
 }
 
-// RatesFor returns the raw per-token rates for model (a LiteLLM pricing
-// key), for callers that want them. ok is false if the model is unknown or
-// has no positive rates. The returned rats are copies; mutating them cannot
-// corrupt the shared table.
+// RatesFor returns the raw standard-tier per-token rates for model (a
+// LiteLLM pricing key), for callers that want them. ok is false if the
+// model is unknown or has no positive rates. The returned rats are copies;
+// mutating them cannot corrupt the shared table.
 func RatesFor(model string) (Rates, bool) {
-	r, ok := table()[model]
+	return RatesForTier(model, TierStandard)
+}
+
+// RatesForTier returns the raw per-token rates for model at a service tier.
+// ok is false if the model is unknown, has no priceable rates at that tier,
+// or the tier is not one of the [ServiceTier] constants. The returned rats
+// are copies; mutating them cannot corrupt the shared table.
+func RatesForTier(model string, tier ServiceTier) (Rates, bool) {
+	r, ok := table()[model][tier]
 	if !ok {
 		return Rates{}, false
 	}
@@ -269,43 +307,79 @@ func ceilNls(usd *big.Rat) Nls {
 	return q.Int64()
 }
 
-// table lazily parses the embedded LiteLLM JSON into per-model rates. A
-// malformed embed is impossible past CI and panics.
-var table = sync.OnceValue(func() map[string]Rates {
+// table lazily parses the embedded LiteLLM JSON into per-model, per-service-
+// tier rates. A malformed embed is impossible past CI and panics.
+var table = sync.OnceValue(func() map[string]map[ServiceTier]Rates {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(litellmJSON, &raw); err != nil {
 		panic(fmt.Errorf("llmcost: parse embedded LiteLLM data: %w", err))
 	}
-	models := make(map[string]Rates, len(raw))
+	models := make(map[string]map[ServiceTier]Rates, len(raw))
 	for model, spec := range raw {
-		if r, ok := parseModel(spec); ok {
-			models[model] = r
+		if m, ok := parseModel(spec); ok {
+			models[model] = m
 		}
 	}
 	return models
 })
 
-// tierKey matches LiteLLM's tier-defining keys (input_cost_per_token_above_200k_tokens,
-// ..._above_128k_tokens, ..._above_272_tokens). Anchoring to the end excludes
-// service-tier variants like *_tokens_priority, which price OpenAI's
-// priority/flex tiers — out of scope (standard tier only), exactly as
-// LiteLLM's own calculator excludes them from threshold detection.
-var tierKey = regexp.MustCompile(`^input_cost_per_token_above_(\d+)(k?)_tokens$`)
+// serviceSuffixes maps each ServiceTier to the key suffix LiteLLM appends to
+// that tier's rate variants (input_cost_per_token_flex,
+// cache_read_input_token_cost_priority, …). The standard tier is the bare
+// key.
+var serviceSuffixes = map[ServiceTier]string{TierStandard: "", TierFlex: "_flex", TierPriority: "_priority"}
 
-// parseModel builds Rates from one LiteLLM model spec. ok is false for
-// entries that cannot bill — no pricing, zero/negative rates, or rows like
-// "sample_spec" — which therefore must not resolve. Cost fields decode as
-// json.Number and convert to big.Rat from their decimal literals, so rates
-// are exact. Tiers come from the *_above_Xk_tokens key family, keyed on the
-// input-cost key (as in LiteLLM's calculator); each tier's components resolve
-// to the tiered rate when upstream defines one and inherit the base rate
-// otherwise.
-func parseModel(spec json.RawMessage) (Rates, bool) {
+// tierKey matches LiteLLM's context-window-tier-defining keys
+// (input_cost_per_token_above_200k_tokens, ..._above_128k_tokens,
+// ..._above_272k_tokens), with an optional service-tier suffix
+// (..._above_272k_tokens_priority) captured so each service tier's parse
+// accepts only its own keys. Anchoring to the end still excludes every
+// other variant family (e.g. *_batches, which prices the Batch API — not a
+// per-request service tier), exactly as LiteLLM's own calculator excludes
+// them from threshold detection.
+var tierKey = regexp.MustCompile(`^input_cost_per_token_above_(\d+)(k?)_tokens(_flex|_priority)?$`)
+
+// parseModel builds per-service-tier Rates from one LiteLLM model spec. ok
+// is false for entries that cannot bill at the STANDARD tier — no pricing,
+// zero/negative rates, or rows like "sample_spec" — which therefore must not
+// resolve at all: standard rates anchor table membership (LiteLLM has no
+// tier-only models; such an entry is upstream garbage). Flex and priority
+// parse independently from their *_flex / *_priority field variants and are
+// present only when priceable in their own right — a tier never inherits
+// another tier's rates, so a model without flex rates simply has no flex
+// entry and fails to price flex usage.
+func parseModel(spec json.RawMessage) (map[ServiceTier]Rates, bool) {
 	var fields map[string]json.RawMessage
 	if json.Unmarshal(spec, &fields) != nil {
-		return Rates{}, false
+		return nil, false
 	}
-	rates := func(suffix string, base TierRates) TierRates {
+	std, ok := parseTier(fields, "")
+	if !ok {
+		return nil, false
+	}
+	m := map[ServiceTier]Rates{TierStandard: std}
+	for tier, svc := range serviceSuffixes {
+		if tier == TierStandard {
+			continue
+		}
+		if r, ok := parseTier(fields, svc); ok {
+			m[tier] = r
+		}
+	}
+	return m, true
+}
+
+// parseTier builds one service tier's Rates from a model's fields, reading
+// only keys carrying that tier's suffix (svc, per serviceSuffixes). Key
+// names compose as <component><ctx-suffix><svc-suffix> — e.g.
+// "input_cost_per_token" + "_above_272k_tokens" + "_priority". Cost fields
+// decode as json.Number and convert to big.Rat from their decimal literals,
+// so rates are exact. Context-window tiers come from the tierKey family
+// whose service suffix matches svc; each tier's components resolve to the
+// tiered rate when upstream defines one and inherit THIS service tier's
+// base rate otherwise — never another service tier's.
+func parseTier(fields map[string]json.RawMessage, svc string) (Rates, bool) {
+	rates := func(ctx string, base TierRates) TierRates {
 		or := func(r, fallback *big.Rat) *big.Rat {
 			if r != nil {
 				return r
@@ -313,12 +387,12 @@ func parseModel(spec json.RawMessage) (Rates, bool) {
 			return fallback
 		}
 		return TierRates{
-			Input:         or(ratField(fields, "input_cost_per_token"+suffix), base.Input),
-			CacheRead:     or(ratField(fields, "cache_read_input_token_cost"+suffix), base.CacheRead),
-			CacheCreation: or(ratField(fields, "cache_creation_input_token_cost"+suffix), base.CacheCreation),
+			Input:         or(ratField(fields, "input_cost_per_token"+ctx+svc), base.Input),
+			CacheRead:     or(ratField(fields, "cache_read_input_token_cost"+ctx+svc), base.CacheRead),
+			CacheCreation: or(ratField(fields, "cache_creation_input_token_cost"+ctx+svc), base.CacheCreation),
 			// The 1h write rate tiers too: cache_creation_input_token_cost_above_1hr_above_200k_tokens.
-			CacheCreation1h: or(ratField(fields, "cache_creation_input_token_cost_above_1hr"+suffix), base.CacheCreation1h),
-			Output:          or(ratField(fields, "output_cost_per_token"+suffix), base.Output),
+			CacheCreation1h: or(ratField(fields, "cache_creation_input_token_cost_above_1hr"+ctx+svc), base.CacheCreation1h),
+			Output:          or(ratField(fields, "output_cost_per_token"+ctx+svc), base.Output),
 		}
 	}
 	r := Rates{Base: rates("", TierRates{})}
@@ -327,7 +401,7 @@ func parseModel(spec json.RawMessage) (Rates, bool) {
 	}
 	for key := range fields {
 		m := tierKey.FindStringSubmatch(key)
-		if m == nil {
+		if m == nil || m[3] != svc {
 			continue
 		}
 		threshold, err := strconv.ParseInt(m[1], 10, 64)
