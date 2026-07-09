@@ -34,6 +34,7 @@
 //		CachedInputTokens: u.CachedInputTokens, // the cached subset of InputTokens
 //		OutputTokens:      u.OutputTokens,      // reasoning tokens already included
 //		DataResidency:     residency,           // "eu"/"us" when the host was eu./us.api.openai.com
+//		ServiceTier:       tier,                // "" = standard; TierFlex / TierPriority bill the tier's own rates
 //	})
 //
 // Cost returns (Nls, bool): ok=false whenever the response cannot be priced —
@@ -42,6 +43,31 @@
 // ever silently bills zero or falls back to another component's rate.
 // [RatesFor] exposes the raw per-token rates (base, tiers, and multipliers)
 // for callers that want them.
+//
+// # Service tiers
+//
+// OpenAI bills the same request differently by processing tier: flex
+// (cheaper, slower) and priority (pricier, faster) publish their own
+// per-token rates, carried in LiteLLM's data as *_flex and *_priority field
+// variants. The tier rides on [OpenAIUsage.ServiceTier] — zero value
+// standard — so every provider-specific pricing input lives on its
+// provider's usage type and a flex Claude request is inexpressible;
+// [RatesFor] takes the [ServiceTier] explicitly (a raw lookup with no
+// usage in hand).
+//
+//	llmcost.Cost("gpt-5.5", llmcost.OpenAIUsage{..., ServiceTier: llmcost.TierFlex})
+//
+// The no-fallback rule extends across tiers: a model without priceable rates
+// at the requested tier (e.g. gpt-5.3-codex has no flex rates), a tier
+// missing a rate for a component the usage reports, or an unrecognized
+// non-empty [OpenAIUsage.ServiceTier] value — all return ok=false. Flex or
+// priority usage is never billed at standard rates; that would be a ~2×
+// error in either direction. Context-window tiers exist within a service
+// tier (*_above_Xk_tokens_priority) and resolve there with the same
+// semantics, inheriting that service tier's base rates. Standard rates
+// anchor table membership: a model without them does not resolve at any
+// tier. LiteLLM's *_batches variants price the Batch API, not a per-request
+// service tier, and are not modeled.
 //
 // # Cache pricing
 //
@@ -64,8 +90,8 @@
 // for OpenAI that is exactly the reported InputTokens), the threshold is
 // strict (>, not >=), and once exceeded the ENTIRE request — every input,
 // cache, and output token — bills at the tier's rates, not just the excess.
-// A component upstream leaves untiered inherits its base rate. OpenAI's
-// priority/flex service tiers are out of scope (standard tier only).
+// A component upstream leaves untiered inherits its base rate — the base of
+// the service tier being priced, never another service tier's.
 //
 // # Price multipliers — fast mode, pinned geo, data residency
 //

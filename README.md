@@ -35,11 +35,38 @@ cost, ok := llmcost.Cost("gpt-5.4", llmcost.OpenAIUsage{
     CachedInputTokens: 45000, // input_tokens_details.cached_tokens — subset
     OutputTokens:      800,   // reasoning tokens are a subset, already included
     DataResidency:     "",    // "eu"/"us" when served by eu./us.api.openai.com — bills the 1.1× uplift
+    ServiceTier:       "",    // "" = standard; TierFlex/TierPriority bill that tier's rates
 })
 ```
 
 `ok` is false whenever the response can't be priced — unknown model, or usage
 on a component the model has no rate for. Nothing silently bills zero.
+
+## Service tiers — flex and priority
+
+OpenAI bills the same request differently by processing tier: **flex**
+(cheaper, slower) and **priority** (pricier, faster) publish their own rates
+(LiteLLM's `*_flex` / `*_priority` variants). The tier rides on
+`OpenAIUsage.ServiceTier` (zero value = standard) — Claude usage has no tier
+knob.
+
+```go
+cost, ok := llmcost.Cost("gpt-5.5", llmcost.OpenAIUsage{
+    InputTokens:       46200,
+    CachedInputTokens: 45000,
+    OutputTokens:      800,
+    ServiceTier:       llmcost.TierFlex,
+})
+```
+
+The no-fallback rule extends across tiers: a model without rates at the
+requested tier (gpt-5.3-codex has no flex), a tier missing a component the
+usage reports, or an unrecognized non-empty `ServiceTier` value all return
+`ok=false` — flex/priority usage is
+never silently billed at standard rates (~2× off either way). Priority has
+its own context-window tiers (`*_above_Xk_tokens_priority`), resolved with
+the same semantics. LiteLLM's `*_batches` variants (Batch API) are not
+modeled.
 
 ## Semantics
 
@@ -56,7 +83,8 @@ on a component the model has no rate for. Nothing silently bills zero.
   cache writes; strict `>`), and once over the threshold the **entire
   request** bills at the tier's rates — not just the excess. Verified against
   LiteLLM's own cost calculator and the providers' billing. Untiered
-  components inherit base rates; OpenAI priority/flex tiers are out of scope.
+  components inherit the priced service tier's base rates — never another
+  service tier's.
 - **Price multipliers, no silent standard rates.** Anthropic's fast mode
   (`speed: "fast"`, ×6 on opus-4-6/4-7, ×2 on opus-4-8) and pinned-region
   inference (`usage.inference_geo`, ×1.1 for `us`) multiply uncached input
@@ -65,7 +93,8 @@ on a component the model has no rate for. Nothing silently bills zero.
   to 6×, so billing standard rates on a data lag is a silent 6× underbill.
   OpenAI's data residency (`eu.`/`us.api.openai.com`) uplifts **every**
   component including cache reads (×1.1 on gpt-5.4/5.5); models OpenAI
-  doesn't regionally price bill standard, as in LiteLLM.
+  doesn't regionally price bill standard, as in LiteLLM. Multipliers scale
+  the rates of whichever service tier is being priced.
 - **Exact math, ceiling at the total.** Rates parse from decimal literals
   into `math/big.Rat` — never through float64. The response is priced exactly
   in USD and converted to nls only at the final total, **ceiling-rounded**.
@@ -90,8 +119,9 @@ on a component the model has no rate for. Nothing silently bills zero.
   test that each resolves — that test is your guarantee that a data sync
   can't silently drop a model you depend on.
 
-`RatesFor(model)` exposes the raw per-token rates — base and tiers — for
-callers that want them. See `doc.go` for the full contract.
+`RatesFor(model, tier)` exposes the raw per-token
+rates — base and tiers — for callers that want them. See `doc.go` for the
+full contract.
 
 ## Vendored data
 

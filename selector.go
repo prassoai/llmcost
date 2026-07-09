@@ -126,7 +126,7 @@ func (s ModelSelector) nativeKey() (string, bool) {
 	if !ok {
 		return "", false
 	}
-	r, ok := table()[key]
+	r, ok := table()[key][TierStandard] // standard anchors membership: present for every table entry
 	if !ok || !s.Provider.owns(r.litellmProvider) {
 		return "", false
 	}
@@ -338,8 +338,8 @@ var canonicalIndexes = sync.OnceValue(func() map[Provider]map[canonicalRef]strin
 	}
 	best := map[Provider]map[canonicalRef]candidate{}
 	dead := map[Provider]map[canonicalRef]bool{}
-	for key, r := range table() {
-		c, ok := canonicalize(key, r.litellmProvider)
+	for key, tiers := range table() {
+		c, ok := canonicalize(key, tiers[TierStandard].litellmProvider)
 		if !ok {
 			continue
 		}

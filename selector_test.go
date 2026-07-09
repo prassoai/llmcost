@@ -36,7 +36,7 @@ func TestSelectorKeyGrammar(t *testing.T) {
 			t.Errorf("%+v: Key = %q, %v; want %q, true", tc.sel, got, ok, tc.want)
 			continue
 		}
-		if _, ok := RatesFor(got); !ok {
+		if _, ok := RatesFor(got, TierStandard); !ok {
 			t.Errorf("%+v: key %q does not resolve via RatesFor", tc.sel, got)
 		}
 	}
@@ -158,7 +158,8 @@ func TestSelectorNeverGuesses(t *testing.T) {
 func TestSelectorCanonicalCoverage(t *testing.T) {
 	vendorModel := regexp.MustCompile(`claude|gpt`)
 	counts := map[Provider]int{}
-	for key, r := range table() {
+	for key, tiers := range table() {
+		r := tiers[TierStandard] // standard anchors membership: present for every entry
 		if !vendorModel.MatchString(key) {
 			continue
 		}
@@ -191,7 +192,7 @@ func TestSelectorCanonicalCoverage(t *testing.T) {
 				t.Errorf("%s: canonical %+v resolved to %q, %v; want this key — round trip broken", key, c.ref, got, ok)
 			}
 		case live: // outranked twin of the winner
-			if !ratesEqual(table()[key], table()[winner]) {
+			if !tiersEqual(table()[key], table()[winner]) {
 				t.Errorf("%s: outranked by %s with DIFFERENT rates — canonical selection would misbill", key, winner)
 			}
 			if got, ok := native.Key(); !ok || got != key {
@@ -241,8 +242,8 @@ func nativeSelectorFor(p Provider, key, region string) ModelSelector {
 func TestSelectorCanonicalVendorNames(t *testing.T) {
 	stripDate := regexp.MustCompile(`-\d{8}$`)
 	directFamilies := map[string]bool{}
-	for key, r := range table() {
-		if ProviderOpenAI.owns(r.litellmProvider) || ProviderAnthropic.owns(r.litellmProvider) {
+	for key, tiers := range table() {
+		if lp := tiers[TierStandard].litellmProvider; ProviderOpenAI.owns(lp) || ProviderAnthropic.owns(lp) {
 			directFamilies[stripDate.ReplaceAllString(key, "")] = true
 		}
 	}
@@ -276,8 +277,8 @@ func TestSelectorCanonicalVendorNames(t *testing.T) {
 	}
 	vendorModel := regexp.MustCompile(`claude|gpt`)
 	used := map[Provider]map[string]bool{}
-	for key, r := range table() {
-		c, ok := canonicalize(key, r.litellmProvider)
+	for key, tiers := range table() {
+		c, ok := canonicalize(key, tiers[TierStandard].litellmProvider)
 		if !ok || !vendorModel.MatchString(c.ref.name) {
 			continue
 		}
@@ -343,6 +344,22 @@ func ratesEqual(a, b Rates) bool {
 	}
 	for i := range a.Tiers {
 		if a.Tiers[i].AbovePromptTokens != b.Tiers[i].AbovePromptTokens || !tierRatesEqual(a.Tiers[i].TierRates, b.Tiers[i].TierRates) {
+			return false
+		}
+	}
+	return true
+}
+
+// tiersEqual compares two models' complete pricing across every service
+// tier — an outranked twin that differs only in flex/priority rates would
+// misbill tier-priced usage just the same.
+func tiersEqual(a, b map[ServiceTier]Rates) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for tier, ra := range a {
+		rb, ok := b[tier]
+		if !ok || !ratesEqual(ra, rb) {
 			return false
 		}
 	}

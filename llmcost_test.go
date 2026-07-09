@@ -62,11 +62,16 @@ const opus46Spec = `{
 
 func mustParse(t *testing.T, spec string) Rates {
 	t.Helper()
-	r, ok := parseModel(json.RawMessage(spec))
+	return mustParseTiers(t, spec)[TierStandard]
+}
+
+func mustParseTiers(t *testing.T, spec string) map[ServiceTier]Rates {
+	t.Helper()
+	m, ok := parseModel(json.RawMessage(spec))
 	if !ok {
 		t.Fatal("fixture spec did not parse as priceable")
 	}
-	return r
+	return m
 }
 
 // price runs the full internal pipeline — normalization, premium resolution,
@@ -167,7 +172,7 @@ func TestCacheWriteTTLSplit(t *testing.T) {
 		t.Fatalf("cost = %d, %v; want 863, true", got, ok)
 	}
 	viaAPI, ok2 := Cost("claude-sonnet-4-5", ClaudeUsage{CacheCreationInputTokens: 2000, CacheCreation1hInputTokens: 500})
-	direct, ok3 := cost(table()["claude-sonnet-4-5"], components{cacheCreation: 1500, cacheCreation1h: 500}, premium{})
+	direct, ok3 := cost(table()["claude-sonnet-4-5"][TierStandard], components{cacheCreation: 1500, cacheCreation1h: 500}, premium{})
 	if !ok2 || !ok3 || viaAPI != direct {
 		t.Fatalf("Cost(ClaudeUsage) = %d, %v; internal = %d, %v; want equal and ok", viaAPI, ok2, direct, ok3)
 	}
@@ -241,7 +246,7 @@ func TestOpenAINormalization(t *testing.T) {
 	}
 	// The exported entry point must produce the same normalization from raw counts.
 	viaAPI, ok2 := Cost("gpt-5.4", OpenAIUsage{InputTokens: 1000, CachedInputTokens: 400, OutputTokens: 100})
-	direct, ok3 := cost(table()["gpt-5.4"], components{input: 600, cacheRead: 400, output: 100}, premium{})
+	direct, ok3 := cost(table()["gpt-5.4"][TierStandard], components{input: 600, cacheRead: 400, output: 100}, premium{})
 	if !ok2 || !ok3 || viaAPI != direct {
 		t.Fatalf("Cost(OpenAIUsage) = %d, %v; internal = %d, %v; want equal and ok", viaAPI, ok2, direct, ok3)
 	}
@@ -255,6 +260,132 @@ func TestOpenAITierCountsCachedTokens(t *testing.T) {
 	got, ok := cost(mustParse(t, gpt54Spec), components{input: 1, cacheRead: 272000}, premium{})
 	if !ok || got != 13601 {
 		t.Fatalf("cost = %d, %v; want 13601, true", got, ok)
+	}
+}
+
+// gpt55Spec models gpt-5.5's real standard/flex/priority rates (flex is
+// exactly half, priority exactly double) plus a priority context-window tier
+// in the gpt-5.1-codex-era shape (input and cache-read tiered, output
+// deliberately NOT) so tier-within-tier resolution and intra-service-tier
+// inheritance are both exercised.
+const gpt55Spec = `{
+	"input_cost_per_token": 5e-06,
+	"cache_read_input_token_cost": 5e-07,
+	"output_cost_per_token": 3e-05,
+	"input_cost_per_token_above_272k_tokens": 1e-05,
+	"cache_read_input_token_cost_above_272k_tokens": 1e-06,
+	"output_cost_per_token_above_272k_tokens": 4.5e-05,
+	"input_cost_per_token_flex": 2.5e-06,
+	"cache_read_input_token_cost_flex": 2.5e-07,
+	"output_cost_per_token_flex": 1.5e-05,
+	"input_cost_per_token_priority": 1e-05,
+	"cache_read_input_token_cost_priority": 1e-06,
+	"output_cost_per_token_priority": 6e-05,
+	"input_cost_per_token_above_272k_tokens_priority": 2e-05,
+	"cache_read_input_token_cost_above_272k_tokens_priority": 2e-06,
+	"litellm_provider": "openai"
+}`
+
+// TestServiceTierCost encodes the service-tier requirement: the same usage
+// prices at each tier's own rates. On gpt-5.5's published prices, 600
+// uncached input + 400 cache reads + 100 output:
+//
+//	standard: 600×5e-6  + 400×5e-7   + 100×3e-5   = $0.0062 = 620 nls
+//	flex:     600×2.5e-6 + 400×2.5e-7 + 100×1.5e-5 = $0.0031 = 310 nls (half)
+//	priority: 600×1e-5  + 400×1e-6   + 100×6e-5   = $0.0124 = 1240 nls (double)
+func TestServiceTierCost(t *testing.T) {
+	tiers := mustParseTiers(t, gpt55Spec)
+	c := components{input: 600, cacheRead: 400, output: 100}
+	for tier, want := range map[ServiceTier]Nls{TierStandard: 620, TierFlex: 310, TierPriority: 1240} {
+		r, ok := tiers[tier]
+		if !ok {
+			t.Fatalf("%s tier did not parse", tier)
+		}
+		if got, ok := cost(r, c, premium{}); !ok || got != want {
+			t.Errorf("%s: cost = %d, %v; want %d, true", tier, got, ok, want)
+		}
+	}
+}
+
+// TestPriorityContextTier encodes tier-within-tier: the priority service
+// tier has its own context-window tiers (*_above_272k_tokens_priority) with
+// the same strict-threshold, whole-request semantics — and a component the
+// context tier leaves untiered inherits the PRIORITY base, never standard's.
+//
+//	at 272000 (not above): 272000×1e-5 + 1000×6e-5 = $2.78 = 278000 nls
+//	at 272001 (above):     272001×2e-5 + 1000×6e-5 = $5.50002 = 550002 nls
+//	                       (output inherits priority base 6e-5; inheriting the
+//	                       standard ctx-tier 4.5e-5 would give 548502, the
+//	                       standard base 3e-5 would give 547002)
+func TestPriorityContextTier(t *testing.T) {
+	r := mustParseTiers(t, gpt55Spec)[TierPriority]
+	if got, ok := cost(r, components{input: 272000, output: 1000}, premium{}); !ok || got != 278000 {
+		t.Fatalf("at threshold: cost = %d, %v; want 278000, true", got, ok)
+	}
+	if got, ok := cost(r, components{input: 272001, output: 1000}, premium{}); !ok || got != 550002 {
+		t.Fatalf("above threshold: cost = %d, %v; want 550002, true", got, ok)
+	}
+}
+
+// TestServiceTierNoCrossFallback encodes the no-cross-tier-fallback
+// requirement, both wholesale and per component:
+//
+//   - A model with only stray tier-variant fields but no priceable tier base
+//     (gpt54Spec carries cache_read_priority and a priority context tier but
+//     no priority input/output) has NO priority entry — those fragments must
+//     never resolve against standard rates.
+//   - A tier missing one component (flex without a flex cache-read) fails
+//     usage reporting that component instead of borrowing standard's rate,
+//     which would overbill flex cache reads 2×.
+func TestServiceTierNoCrossFallback(t *testing.T) {
+	tiers := mustParseTiers(t, gpt54Spec)
+	if _, ok := tiers[TierPriority]; ok {
+		t.Error("priority tier resolved from fragments (no priority input/output rates)")
+	}
+	if _, ok := tiers[TierFlex]; ok {
+		t.Error("flex tier resolved despite no flex fields at all")
+	}
+
+	partialFlex := mustParseTiers(t, `{
+		"input_cost_per_token": 1e-06,
+		"cache_read_input_token_cost": 1e-07,
+		"output_cost_per_token": 2e-06,
+		"input_cost_per_token_flex": 5e-07,
+		"output_cost_per_token_flex": 1e-06
+	}`)
+	flex, ok := partialFlex[TierFlex]
+	if !ok {
+		t.Fatal("flex tier with its own input+output rates did not parse")
+	}
+	if _, ok := cost(flex, components{input: 100, cacheRead: 1}, premium{}); ok {
+		t.Error("flex cache reads priced despite no flex cache-read rate")
+	}
+	// 100×5e-7 + 50×1e-6 = $0.0001 = exactly 10 nls: the tier's own rates apply.
+	if got, ok := cost(flex, components{input: 100, output: 50}, premium{}); !ok || got != 10 {
+		t.Errorf("flex without cache usage = %d, %v; want 10, true", got, ok)
+	}
+}
+
+// TestUnknownServiceTier encodes the fail-loud tier contract on both
+// entrances. On [OpenAIUsage.ServiceTier] the zero value bills standard,
+// but any unrecognized non-empty value — arbitrary strings, consumer
+// vocabulary that was never mapped, case variants — returns ok=false
+// rather than silently pricing at standard rates. [RatesFor] takes only
+// the ServiceTier constants: "" is not a constant there and fails like
+// any other unrecognized value.
+func TestUnknownServiceTier(t *testing.T) {
+	for _, tier := range []ServiceTier{"turbo", "fast", "Standard", "STANDARD"} {
+		if _, ok := Cost("gpt-5.4", OpenAIUsage{InputTokens: 1, ServiceTier: tier}); ok {
+			t.Errorf("Cost(ServiceTier: %q) resolved; want ok=false", tier)
+		}
+	}
+	if _, ok := Cost("gpt-5.4", OpenAIUsage{InputTokens: 1}); !ok {
+		t.Error("Cost with zero-value ServiceTier failed; want ok=true (zero value = standard)")
+	}
+	for _, tier := range []ServiceTier{"", "turbo", "fast", "Standard", "STANDARD"} {
+		if _, ok := RatesFor("gpt-5.4", tier); ok {
+			t.Errorf("RatesFor(%q) resolved; want ok=false", tier)
+		}
 	}
 }
 
@@ -278,7 +409,7 @@ func TestClaudeFastMode(t *testing.T) {
 	}
 	// The exported entry point resolves the same premium from the same raw usage.
 	viaAPI, ok := Cost("claude-opus-4-6", u)
-	direct, ok2 := price(table()["claude-opus-4-6"], u)
+	direct, ok2 := price(table()["claude-opus-4-6"][TierStandard], u)
 	if !ok || !ok2 || viaAPI != direct {
 		t.Fatalf("Cost(fast) = %d, %v; internal = %d, %v; want equal and ok", viaAPI, ok, direct, ok2)
 	}
@@ -360,7 +491,7 @@ func TestOpenAIRegionalUplift(t *testing.T) {
 	// The exported entry point resolves the same premium from the same raw usage.
 	u := OpenAIUsage{InputTokens: 1000, CachedInputTokens: 400, OutputTokens: 100, DataResidency: "eu"}
 	viaAPI, ok := Cost("gpt-5.4", u)
-	direct, ok2 := price(table()["gpt-5.4"], u)
+	direct, ok2 := price(table()["gpt-5.4"][TierStandard], u)
 	if !ok || !ok2 || viaAPI != direct {
 		t.Fatalf("Cost(eu) = %d, %v; internal = %d, %v; want equal and ok", viaAPI, ok, direct, ok2)
 	}
@@ -419,35 +550,45 @@ func TestUnknownModel(t *testing.T) {
 		if _, ok := Cost(model, OpenAIUsage{InputTokens: 1}); ok {
 			t.Errorf("Cost(%q) resolved; want ok=false", model)
 		}
-		if _, ok := RatesFor(model); ok {
+		if _, ok := RatesFor(model, TierStandard); ok {
 			t.Errorf("RatesFor(%q) resolved; want ok=false", model)
 		}
 	}
 }
 
-// TestTableInvariants encodes structural guarantees over every parsed model:
-// priceable base rates, tiers strictly ascending with positive thresholds,
-// and priceable tier rates. A violation means parseModel accepted garbage.
+// TestTableInvariants encodes structural guarantees over every parsed model
+// and service tier: the standard tier always present (it anchors table
+// membership), only known service tiers stored, priceable base rates, and
+// context-window tiers strictly ascending with positive thresholds and
+// priceable rates. A violation means parseModel accepted garbage.
 func TestTableInvariants(t *testing.T) {
-	for model, r := range table() {
-		if !r.Base.priceable() {
-			t.Errorf("%s: unpriceable base rates in table", model)
+	for model, tiers := range table() {
+		if _, ok := tiers[TierStandard]; !ok {
+			t.Errorf("%s: no standard tier in table", model)
 		}
-		for i, tier := range r.Tiers {
-			if tier.AbovePromptTokens <= 0 || (i > 0 && tier.AbovePromptTokens <= r.Tiers[i-1].AbovePromptTokens) {
-				t.Errorf("%s: tier thresholds not strictly ascending and positive", model)
+		for tier, r := range tiers {
+			if _, ok := serviceSuffixes[tier]; !ok {
+				t.Errorf("%s: unknown service tier %q in table", model, tier)
 			}
-			if !tier.priceable() {
-				t.Errorf("%s: unpriceable tier rates in table", model)
+			if !r.Base.priceable() {
+				t.Errorf("%s/%s: unpriceable base rates in table", model, tier)
 			}
-		}
-		if r.Fast != nil && r.Fast.Sign() <= 0 {
-			t.Errorf("%s: non-positive fast multiplier", model)
-		}
-		for _, m := range []map[string]*big.Rat{r.Geo, r.RegionalUplift} {
-			for key, f := range m {
-				if f == nil || f.Sign() <= 0 {
-					t.Errorf("%s: non-positive multiplier %q", model, key)
+			for i, ctx := range r.Tiers {
+				if ctx.AbovePromptTokens <= 0 || (i > 0 && ctx.AbovePromptTokens <= r.Tiers[i-1].AbovePromptTokens) {
+					t.Errorf("%s/%s: tier thresholds not strictly ascending and positive", model, tier)
+				}
+				if !ctx.priceable() {
+					t.Errorf("%s/%s: unpriceable tier rates in table", model, tier)
+				}
+			}
+			if r.Fast != nil && r.Fast.Sign() <= 0 {
+				t.Errorf("%s/%s: non-positive fast multiplier", model, tier)
+			}
+			for _, m := range []map[string]*big.Rat{r.Geo, r.RegionalUplift} {
+				for key, f := range m {
+					if f == nil || f.Sign() <= 0 {
+						t.Errorf("%s/%s: non-positive multiplier %q", model, tier, key)
+					}
 				}
 			}
 		}
@@ -464,12 +605,12 @@ func TestTableInvariants(t *testing.T) {
 // build, not silently bills zero.
 func TestVendoredDataCanaries(t *testing.T) {
 	for _, model := range []string{"claude-opus-4-8", "claude-haiku-4-5", "gpt-5.4", "gpt-4o", "codex-mini-latest"} {
-		if _, ok := RatesFor(model); !ok {
+		if _, ok := RatesFor(model, TierStandard); !ok {
 			t.Errorf("canary %s no longer resolves", model)
 		}
 	}
 	for model, want := range map[string]int64{"claude-sonnet-4-5": 200000, "gpt-5.4": 272000} {
-		r, ok := RatesFor(model)
+		r, ok := RatesFor(model, TierStandard)
 		if !ok {
 			t.Errorf("%s no longer resolves", model)
 			continue
@@ -478,43 +619,65 @@ func TestVendoredDataCanaries(t *testing.T) {
 			t.Errorf("%s: no %d tier parsed from vendored data (tiers: %+v)", model, want, r.Tiers)
 		}
 	}
+	// Service-tier canaries: known tier shapes at the vendored commit. gpt-5.5
+	// publishes both flex and priority; gpt-5.3-codex publishes priority but
+	// no flex — a sync that grows it flex rates should update this canary, a
+	// sync that drops gpt-5.5's tiers demands scrutiny before merging.
+	for model, tiers := range map[string]map[ServiceTier]bool{
+		"gpt-5.5":       {TierFlex: true, TierPriority: true},
+		"gpt-5.4-mini":  {TierFlex: true, TierPriority: true},
+		"gpt-5.3-codex": {TierFlex: false, TierPriority: true},
+	} {
+		for tier, want := range tiers {
+			if _, ok := RatesFor(model, tier); ok != want {
+				t.Errorf("%s at %s: resolves=%v, want %v", model, tier, ok, want)
+			}
+		}
+	}
 	// Multiplier canaries: opus-4-8's fast/us factors and gpt-5.4's regional
 	// uplifts must parse. If these vanish after a sync, fast-mode and pinned-
 	// geo usage starts failing (never underbilling) and residency usage
 	// starts billing standard — verify against upstream before merging.
-	if r, ok := RatesFor("claude-opus-4-8"); !ok || r.Fast == nil || r.Fast.Cmp(big.NewRat(2, 1)) != 0 || r.Geo["us"] == nil {
+	if r, ok := RatesFor("claude-opus-4-8", TierStandard); !ok || r.Fast == nil || r.Fast.Cmp(big.NewRat(2, 1)) != 0 || r.Geo["us"] == nil {
 		t.Errorf("claude-opus-4-8 multipliers = fast %v, geo %v; want fast 2 and a us factor", r.Fast, r.Geo)
 	}
-	if r, ok := RatesFor("gpt-5.4"); !ok || r.RegionalUplift["eu"] == nil || r.RegionalUplift["us"] == nil {
+	if r, ok := RatesFor("gpt-5.4", TierStandard); !ok || r.RegionalUplift["eu"] == nil || r.RegionalUplift["us"] == nil {
 		t.Errorf("gpt-5.4 regional uplifts = %v; want eu and us factors", r.RegionalUplift)
 	}
 }
 
 // TestCostMatchesRatesFor encodes that the exported views never disagree:
-// Cost prices exactly what RatesFor-derived math predicts — for EVERY model
-// in the table, through both usage shapes, including across tier boundaries
-// and on models that fail (unpriced components must fail identically).
+// Cost prices exactly what RatesFor-derived math predicts — for
+// EVERY model and service tier in the table, including across context-tier
+// boundaries and on models that fail (unpriced components must fail
+// identically). The ClaudeUsage shape covers the standard tier (Claude has
+// no tier field and always bills standard); the OpenAIUsage shape covers
+// every tier via [OpenAIUsage.ServiceTier].
 func TestCostMatchesRatesFor(t *testing.T) {
-	for model, r := range table() {
-		for _, c := range []components{
-			{input: 3117, cacheRead: 41775, cacheCreation: 2048, cacheCreation1h: 512, output: 977},
-			{input: 300000, cacheRead: 41775, output: 977}, // above any 200k/272k tier
-		} {
-			want, wantOK := cost(r, c, premium{})
-			got, gotOK := Cost(model, ClaudeUsage{
-				InputTokens:                c.input,
-				CacheReadInputTokens:       c.cacheRead,
-				CacheCreationInputTokens:   c.cacheCreation + c.cacheCreation1h, // raw API total
-				CacheCreation1hInputTokens: c.cacheCreation1h,
-				OutputTokens:               c.output,
-			})
-			if got != want || gotOK != wantOK {
-				t.Errorf("%s %+v: Cost = %d, %v; RatesFor math = %d, %v", model, c, got, gotOK, want, wantOK)
-			}
-			if c.cacheCreation == 0 && c.cacheCreation1h == 0 {
-				gotOA, okOA := Cost(model, OpenAIUsage{InputTokens: c.input + c.cacheRead, CachedInputTokens: c.cacheRead, OutputTokens: c.output})
-				if gotOA != want || okOA != wantOK {
-					t.Errorf("%s %+v: Cost(OpenAIUsage) = %d, %v; RatesFor math = %d, %v", model, c, gotOA, okOA, want, wantOK)
+	for model, tiers := range table() {
+		for tier, r := range tiers {
+			for _, c := range []components{
+				{input: 3117, cacheRead: 41775, cacheCreation: 2048, cacheCreation1h: 512, output: 977},
+				{input: 300000, cacheRead: 41775, output: 977}, // above any 200k/272k tier
+			} {
+				want, wantOK := cost(r, c, premium{})
+				if tier == TierStandard {
+					got, gotOK := Cost(model, ClaudeUsage{
+						InputTokens:                c.input,
+						CacheReadInputTokens:       c.cacheRead,
+						CacheCreationInputTokens:   c.cacheCreation + c.cacheCreation1h, // raw API total
+						CacheCreation1hInputTokens: c.cacheCreation1h,
+						OutputTokens:               c.output,
+					})
+					if got != want || gotOK != wantOK {
+						t.Errorf("%s/%s %+v: Cost = %d, %v; RatesFor math = %d, %v", model, tier, c, got, gotOK, want, wantOK)
+					}
+				}
+				if c.cacheCreation == 0 && c.cacheCreation1h == 0 {
+					gotOA, okOA := Cost(model, OpenAIUsage{InputTokens: c.input + c.cacheRead, CachedInputTokens: c.cacheRead, OutputTokens: c.output, ServiceTier: tier})
+					if gotOA != want || okOA != wantOK {
+						t.Errorf("%s/%s %+v: Cost(OpenAIUsage) = %d, %v; RatesFor math = %d, %v", model, tier, c, gotOA, okOA, want, wantOK)
+					}
 				}
 			}
 		}
@@ -534,7 +697,7 @@ func TestRatesForReturnsCopies(t *testing.T) {
 		{"gpt-5.4", OpenAIUsage{InputTokens: 1000, CachedInputTokens: 400, DataResidency: "eu"}}, // uplift rat exercised
 	} {
 		before, _ := Cost(tc.model, tc.u)
-		r, _ := RatesFor(tc.model)
+		r, _ := RatesFor(tc.model, TierStandard)
 		all := []TierRates{r.Base}
 		for _, tier := range r.Tiers {
 			all = append(all, tier.TierRates)
