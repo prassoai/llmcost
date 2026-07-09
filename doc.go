@@ -116,16 +116,27 @@
 // Bedrock — and each is its own table entry.
 //
 // [ModelSelector] owns the key GRAMMAR for Anthropic and OpenAI models
-// across direct, Bedrock, Vertex, and Azure: Key() deterministically
-// constructs the key from (provider, native model id, region) and verifies
-// it resolves — never guessing, never falling back (a missing Azure region
-// key fails rather than billing the cheaper global key). This module still
-// owns no fuzzy alias layer: WHICH selectors a consumer bills is the
-// consumer's policy, and the consumer should test that each of its
-// selectors resolves — that test is the guarantee that a data sync can't
-// silently drop a model it depends on. A model prices only if LiteLLM lists
-// positive input and output rates for it — entries without pricing (or with
-// zero rates) return ok=false.
+// across direct, Bedrock, Vertex, Azure OpenAI, and Azure AI Foundry.
+// Key() resolves the provider's NATIVE id verbatim, or the VENDOR's
+// canonical model name through the cloud's bespoke renaming scheme —
+// Bedrock's vendor prefixes, artifact versions (-v1:0), geo profiles and
+// aws-region key forms; Vertex's @date and @default; Azure's gpt-35
+// spelling — so {Bedrock, "claude-sonnet-4-5-20250929"} selects
+// "anthropic.claude-sonnet-4-5-20250929-v1:0" and
+// {Bedrock, "claude-sonnet-4-5", "us"} the us. inference profile.
+// Resolution is deterministic and verified: never guessing (an undated name
+// ambiguous across several dated variants fails), never falling back (a
+// missing Azure region key fails rather than billing the cheaper global
+// key), and never crossing providers (the resolved entry's own
+// litellm_provider must match). TestSelectorCanonicalCoverage gates every
+// data sync on the whole scheme: each cloud-served Anthropic/OpenAI key
+// must remain selectable by its vendor name. This module still owns no
+// fuzzy alias layer: WHICH selectors a consumer bills is the consumer's
+// policy, and the consumer should test that each of its selectors resolves
+// — that test is the guarantee that a data sync can't silently drop a model
+// it depends on. A model prices only if LiteLLM lists positive input and
+// output rates for it — entries without pricing (or with zero rates) return
+// ok=false.
 //
 // # Vendored data
 //

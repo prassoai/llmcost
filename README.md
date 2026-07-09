@@ -76,11 +76,19 @@ on a component the model has no rate for. Nothing silently bills zero.
   `gpt-5.4` vs `azure/gpt-5.4` vs `azure/us/gpt-5.4` (Azure data zones carry
   a ~10% premium in the rates), Claude direct vs Bedrock AWS ids vs
   `vertex_ai/…` — each its own key. `ModelSelector{Provider, Model, Region}.Key()`
-  constructs the key **deterministically** from the provider's native model
-  id and verifies it resolves; it never guesses and never falls back (a
-  missing Azure region key fails, not bills the cheaper global key). Which
-  selectors you bill is your policy: test that each resolves — that test is
-  your guarantee that a data sync can't silently drop a model you depend on.
+  resolves the provider's **native id** verbatim or the **vendor's canonical
+  name** through each cloud's bespoke renaming scheme (Bedrock's
+  `anthropic.` prefix, `-v1:0` artifact versions, `us.` geo profiles;
+  Vertex's `@date`/`@default`; Azure's `gpt-35` spelling):
+  `{Bedrock, "claude-sonnet-4-5", "us"}` →
+  `us.anthropic.claude-sonnet-4-5-20250929-v1:0`. Resolution is
+  **deterministic and verified** — an ambiguous undated name fails, a
+  missing region key fails (never the cheaper global key), a cross-provider
+  key fails — and `TestSelectorCanonicalCoverage` gates every data sync on
+  the whole scheme: each cloud-served Anthropic/OpenAI key must stay
+  selectable by its vendor name. Which selectors you bill is your policy:
+  test that each resolves — that test is your guarantee that a data sync
+  can't silently drop a model you depend on.
 
 `RatesFor(model)` exposes the raw per-token rates — base and tiers — for
 callers that want them. See `doc.go` for the full contract.
