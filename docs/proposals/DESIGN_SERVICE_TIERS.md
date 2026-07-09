@@ -18,10 +18,14 @@ documented "when llmcost grows tier support" TODO pointing here
 - **R1** A caller can price a response at OpenAI's `flex` or `priority`
   service tier with the same exactness guarantees as standard pricing
   (big.Rat arithmetic, ceiling-round only the final total).
-- **R2** One way to price: `Cost` and `RatesFor` take the tier as an
-  explicit parameter — no standard-tier convenience wrappers. llmcost has
-  no backwards-compatibility contract; consumers update their call sites
-  (passing `TierStandard`) when they bump the module version.
+- **R2** One way to price, provider-shaped: the billing entrypoint stays
+  `Cost(model, usage)`, and the service tier lives on `OpenAIUsage` as a
+  field — beside `DataResidency`, like every provider-specific pricing
+  input (`ClaudeUsage` carries `Speed`/`InferenceGeo`). The sealed `Usage`
+  interface then makes a nonsensical combination — a flex Claude request —
+  inexpressible at compile time instead of a runtime `ok=false`. No
+  convenience wrappers; llmcost has no backwards-compatibility contract
+  and consumers update call sites when they bump.
 - **R3** No cross-tier fallback: pricing at a tier the model has no rates
   for — or usage reporting a component the tier has no rate for — returns
   `ok=false`. Flex/priority usage is never billed at standard rates (a
@@ -31,8 +35,10 @@ documented "when llmcost grows tier support" TODO pointing here
   strict-threshold, whole-request-re-rates semantics as standard
   context tiers, and a component the context tier leaves untiered inherits
   that service tier's base rate (never standard's).
-- **R5** Only recognized tiers resolve: an unknown or empty tier string
-  returns `ok=false`, never a silent standard fallback.
+- **R5** Only recognized tiers resolve: the field's zero value is the
+  standard tier (matching the other usage mode fields — `Speed: ""`,
+  `DataResidency: ""`), and any other value that is not a `ServiceTier`
+  constant returns `ok=false`, never a silent standard fallback.
 - **R6** Standard rates remain the table-membership anchor: a model
   without priceable standard rates does not resolve at any tier
   (unchanged behavior — LiteLLM has no tier-only models; such an entry is
@@ -47,8 +53,9 @@ documented "when llmcost grows tier support" TODO pointing here
 
 ## Proposed design
 
-One new exported type and one new parameter on the two existing functions;
-everything else is the existing machinery parameterized by a key suffix.
+One new exported type, one new field on `OpenAIUsage`, and one new
+parameter on `RatesFor`; everything else is the existing machinery
+parameterized by a key suffix.
 
 ```go
 // ServiceTier selects which of a model's per-request rate variants price
@@ -61,9 +68,24 @@ const (
     TierPriority ServiceTier = "priority" // LiteLLM's *_priority fields
 )
 
-func Cost(model string, tier ServiceTier, u Usage) (Nls, bool) // (satisfies R1, R2, R3, R5)
-func RatesFor(model string, tier ServiceTier) (Rates, bool)    // (satisfies R2)
+type OpenAIUsage struct {
+    InputTokens       int64
+    CachedInputTokens int64
+    OutputTokens      int64
+    ServiceTier       ServiceTier // "" = standard; the request's service_tier param
+    DataResidency     string
+}
+
+func Cost(model string, u Usage) (Nls, bool)                // tier from the usage (satisfies R1, R2, R3, R5)
+func RatesFor(model string, tier ServiceTier) (Rates, bool) // raw lookup keeps tier explicit
 ```
+
+The sealed `Usage` interface gains an unexported `tier()` method:
+`ClaudeUsage` always resolves `TierStandard` (Anthropic has no service
+tiers; its per-request modes are `Speed`/`InferenceGeo` multipliers), and
+`OpenAIUsage` resolves its field — zero value standard, constants pass,
+anything else fails (R5). `RatesFor` keeps the tier as a parameter: it is
+a raw table lookup with no usage in hand.
 
 - **Table shape.** `table()` becomes `map[string]map[ServiceTier]Rates`.
   `parseModel` parses the standard tier exactly as today and gates
@@ -87,9 +109,9 @@ func RatesFor(model string, tier ServiceTier) (Rates, bool)    // (satisfies R2)
   bills zero or falls back to another component's rate") extends to tiers;
   inheriting standard's cache-read into flex would overbill 2×. (R3, R4)
 - **Lookup.** `Cost` validates usage first (impossible counts panic even
-  for unknown models/tiers, as today), then `table()[model][tier]` — an
-  unknown model, missing tier, or unrecognized tier string is one uniform
-  `ok=false`. (R3, R5)
+  for unknown models/tiers, as today), resolves the tier from the usage,
+  then `table()[model][tier]` — an unknown model, missing tier, or
+  unrecognized tier value is one uniform `ok=false`. (R3, R5)
 - **Composition with price multipliers.** Fast/geo/residency premiums
   (added on main in parallel with this design) resolve against the
   service tier's own `Rates` and scale its tier-resolved rates — the same
@@ -109,18 +131,19 @@ func RatesFor(model string, tier ServiceTier) (Rates, bool)    // (satisfies R2)
 The Go API is the caller surface. Pricing a flex-tier response:
 
 ```go
-nls, ok := llmcost.Cost("gpt-5.5", llmcost.TierFlex, llmcost.OpenAIUsage{
+nls, ok := llmcost.Cost("gpt-5.5", llmcost.OpenAIUsage{
     InputTokens:       u.InputTokens,       // total input, cached included
     CachedInputTokens: u.CachedInputTokens,
     OutputTokens:      u.OutputTokens,
+    ServiceTier:       llmcost.TierFlex,    // the request's service_tier param
 })
 ```
 
 `ok=false` when the model has no flex rates (e.g. gpt-5.3-codex) — the
 caller decides whether that is "record zero and log" (murmuration's
-choice) or an error. Existing call sites gain a `TierStandard` argument
-when their module bumps (R2); until then they stay pinned to the old
-version and are unaffected.
+choice) or an error. Claude callers never see a tier knob they cannot
+use. Existing consumers stay pinned to their old version until they bump
+(R2); murmuration's follow-up sets the field from codex's `service_tier`.
 
 Consumers own the mapping from their tier vocabulary to these constants
 (same rule as model ids): murmuration's follow-up maps its codex

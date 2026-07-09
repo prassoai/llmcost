@@ -31,12 +31,17 @@ const nlsPerUSD = 100_000
 // response. OpenAI bills the same request differently by processing tier:
 // flex (cheaper, slower) and priority (pricier, faster) each publish their
 // own per-token rates, carried in LiteLLM's data as *_flex and *_priority
-// field variants. Only the three constants below resolve — an unknown or
-// empty tier is unpriced (ok=false), never a silent standard fallback — and
-// there is no cross-tier fallback: a model without rates at the requested
-// tier fails rather than billing another tier's rates (a ~2× error in
-// either direction). LiteLLM's *_batches variants (Batch API) are not
-// service tiers and are not modeled.
+// field variants. The tier is an OpenAI request parameter, so like every
+// provider-specific pricing input it lives on the provider's usage type —
+// [OpenAIUsage.ServiceTier] — and Anthropic usage always bills the standard
+// tier; the sealed [Usage] interface makes a flex Claude request
+// inexpressible. On the field, the zero value means standard (matching the
+// other usage mode fields); any other value must be one of the constants
+// below — an unrecognized tier is unpriced (ok=false), never a silent
+// standard fallback — and there is no cross-tier fallback: a model without
+// rates at the requested tier fails rather than billing another tier's
+// rates (a ~2× error in either direction). LiteLLM's *_batches variants
+// (Batch API) are not service tiers and are not modeled.
 type ServiceTier string
 
 const (
@@ -113,10 +118,18 @@ type ClaudeUsage struct {
 // fast/geo modes, residency is a transport fact that holds for every model,
 // and OpenAI publishes the uplift only for the models it regionally prices —
 // LiteLLM's calculator prices absent uplifts the same way.
+//
+// ServiceTier is the REQUEST's service_tier parameter: "" or [TierStandard]
+// for ordinary requests, [TierFlex], or [TierPriority]. Flex and priority
+// bill the model's *_flex / *_priority rate variants for every component; a
+// model without rates at the tier, or an unrecognized tier value, fails to
+// price rather than billing standard rates (~2× off in either direction —
+// see [ServiceTier]).
 type OpenAIUsage struct {
 	InputTokens       int64
 	CachedInputTokens int64
 	OutputTokens      int64
+	ServiceTier       ServiceTier
 	DataResidency     string
 }
 
@@ -185,6 +198,10 @@ type Usage interface {
 	// usage reports a mode the model has no multiplier for — such usage must
 	// fail, never bill at standard rates.
 	premium(r Rates) (p premium, ok bool)
+	// tier selects which service tier's rates price the response. ok is
+	// false for a value that is not a [ServiceTier] constant — an
+	// unrecognized tier must fail, never bill standard rates.
+	tier() (ServiceTier, bool)
 }
 
 // premium is a response's resolved price multipliers: tokens scales uncached
@@ -195,21 +212,25 @@ type premium struct {
 	tokens, cache *big.Rat
 }
 
-// Cost prices one response in nls. model is the LiteLLM pricing key; tier
-// is one of the [ServiceTier] constants — [TierStandard] for ordinary
-// requests. Cost normalizes the provider's raw usage into disjoint
-// components, resolves the context-window tier from the total prompt size
-// within the service tier, computes rate × tokens exactly per component
+// Cost prices one response in nls. model is the LiteLLM pricing key. Cost
+// normalizes the provider's raw usage into disjoint components, resolves
+// the service tier from the usage ([OpenAIUsage.ServiceTier]; Anthropic
+// usage always bills standard) and the context-window tier from the total
+// prompt size within it, computes rate × tokens exactly per component
 // (scaled by any fast/geo/residency multiplier the usage triggers), sums in
 // USD, and ceiling-rounds only the final total, so sub-nls token costs
 // accumulate instead of truncating to zero and any non-zero usage costs at
 // least 1 nls. ok is false if the model is unknown, has no priceable rates
-// at the tier (e.g. a model LiteLLM lists no *_flex fields for), the tier
-// is not a [ServiceTier] constant, or the tier lacks a rate for a component
-// — or a multiplier for a mode — the usage reports. There is deliberately
-// no fallback to another tier's rates.
-func Cost(model string, tier ServiceTier, u Usage) (Nls, bool) {
+// at the usage's service tier (e.g. a model LiteLLM lists no *_flex fields
+// for), the tier value is unrecognized, or the tier lacks a rate for a
+// component — or a multiplier for a mode — the usage reports. There is
+// deliberately no fallback to another tier's rates.
+func Cost(model string, u Usage) (Nls, bool) {
 	c := u.disjoint() // before the lookup: impossible counts panic even for unknown models and tiers
+	tier, ok := u.tier()
+	if !ok {
+		return 0, false
+	}
 	r, ok := table()[model][tier]
 	if !ok {
 		return 0, false
@@ -270,6 +291,10 @@ func (u ClaudeUsage) premium(r Rates) (premium, bool) {
 	return premium{tokens: m}, true
 }
 
+// tier is always standard: Anthropic has no service tiers — its per-request
+// pricing modes are Speed and InferenceGeo, priced as multipliers.
+func (u ClaudeUsage) tier() (ServiceTier, bool) { return TierStandard, true }
+
 func (u OpenAIUsage) disjoint() components {
 	if u.InputTokens < 0 || u.CachedInputTokens < 0 || u.OutputTokens < 0 {
 		panic(fmt.Sprintf("llmcost: negative token counts: %+v", u))
@@ -293,6 +318,20 @@ func (u OpenAIUsage) premium(r Rates) (premium, bool) {
 		return premium{tokens: f, cache: f}, true
 	}
 	return premium{}, true
+}
+
+// tier resolves the request's service_tier field: the zero value is the
+// standard tier (matching the other usage mode fields), the constants pass
+// through, and anything else fails — an unrecognized tier must never bill
+// standard rates.
+func (u OpenAIUsage) tier() (ServiceTier, bool) {
+	switch u.ServiceTier {
+	case "", TierStandard:
+		return TierStandard, true
+	case TierFlex, TierPriority:
+		return u.ServiceTier, true
+	}
+	return "", false
 }
 
 // RatesFor returns the raw per-token rates for model (a LiteLLM pricing

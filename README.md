@@ -16,7 +16,7 @@ components inside. Never pre-subtract, never mix shapes.
 **Anthropic** (disjoint counts — `input_tokens` EXCLUDES cache activity):
 
 ```go
-cost, ok := llmcost.Cost("claude-opus-4-8", llmcost.TierStandard, llmcost.ClaudeUsage{
+cost, ok := llmcost.Cost("claude-opus-4-8", llmcost.ClaudeUsage{
     InputTokens:                1200,  // usage.input_tokens — uncached input only
     CacheReadInputTokens:       45000, // usage.cache_read_input_tokens
     CacheCreationInputTokens:   3000,  // usage.cache_creation_input_tokens — TOTAL writes, both TTLs
@@ -30,11 +30,12 @@ cost, ok := llmcost.Cost("claude-opus-4-8", llmcost.TierStandard, llmcost.Claude
 **OpenAI / codex** (overlapping counts — `input_tokens` INCLUDES cached):
 
 ```go
-cost, ok := llmcost.Cost("gpt-5.4", llmcost.TierStandard, llmcost.OpenAIUsage{
+cost, ok := llmcost.Cost("gpt-5.4", llmcost.OpenAIUsage{
     InputTokens:       46200, // usage.input_tokens — total, cached included
     CachedInputTokens: 45000, // input_tokens_details.cached_tokens — subset
     OutputTokens:      800,   // reasoning tokens are a subset, already included
     DataResidency:     "",    // "eu"/"us" when served by eu./us.api.openai.com — bills the 1.1× uplift
+    ServiceTier:       "",    // "" = standard; TierFlex/TierPriority bill that tier's rates
 })
 ```
 
@@ -45,21 +46,23 @@ on a component the model has no rate for. Nothing silently bills zero.
 
 OpenAI bills the same request differently by processing tier: **flex**
 (cheaper, slower) and **priority** (pricier, faster) publish their own rates
-(LiteLLM's `*_flex` / `*_priority` variants). `Cost` takes the tier
-explicitly — `TierStandard` for ordinary requests.
+(LiteLLM's `*_flex` / `*_priority` variants). The tier rides on
+`OpenAIUsage.ServiceTier` (zero value = standard) — Claude usage has no tier
+knob.
 
 ```go
-cost, ok := llmcost.Cost("gpt-5.5", llmcost.TierFlex, llmcost.OpenAIUsage{
+cost, ok := llmcost.Cost("gpt-5.5", llmcost.OpenAIUsage{
     InputTokens:       46200,
     CachedInputTokens: 45000,
     OutputTokens:      800,
+    ServiceTier:       llmcost.TierFlex,
 })
 ```
 
 The no-fallback rule extends across tiers: a model without rates at the
 requested tier (gpt-5.3-codex has no flex), a tier missing a component the
-usage reports, or a tier string that isn't one of `TierStandard` /
-`TierFlex` / `TierPriority` all return `ok=false` — flex/priority usage is
+usage reports, or an unrecognized non-empty `ServiceTier` value all return
+`ok=false` — flex/priority usage is
 never silently billed at standard rates (~2× off either way). Priority has
 its own context-window tiers (`*_above_Xk_tokens_priority`), resolved with
 the same semantics. LiteLLM's `*_batches` variants (Batch API) are not

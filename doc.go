@@ -17,7 +17,7 @@
 //
 // Anthropic reports disjoint counts — input_tokens EXCLUDES cache activity:
 //
-//	llmcost.Cost("claude-opus-4-8", llmcost.TierStandard, llmcost.ClaudeUsage{
+//	llmcost.Cost("claude-opus-4-8", llmcost.ClaudeUsage{
 //		InputTokens:                u.InputTokens,          // uncached input only
 //		CacheReadInputTokens:       u.CacheReadInputTokens, // billed at the cache-read rate
 //		CacheCreationInputTokens:   u.CacheCreationInputTokens, // TOTAL cache writes, both TTLs
@@ -29,11 +29,12 @@
 //
 // OpenAI reports overlapping counts — input_tokens INCLUDES cached_tokens:
 //
-//	llmcost.Cost("gpt-5.4", llmcost.TierStandard, llmcost.OpenAIUsage{
+//	llmcost.Cost("gpt-5.4", llmcost.OpenAIUsage{
 //		InputTokens:       u.InputTokens,       // total input, cached included
 //		CachedInputTokens: u.CachedInputTokens, // the cached subset of InputTokens
 //		OutputTokens:      u.OutputTokens,      // reasoning tokens already included
 //		DataResidency:     residency,           // "eu"/"us" when the host was eu./us.api.openai.com
+//		ServiceTier:       tier,                // "" = standard; TierFlex / TierPriority bill the tier's own rates
 //	})
 //
 // Cost returns (Nls, bool): ok=false whenever the response cannot be priced —
@@ -48,16 +49,18 @@
 // OpenAI bills the same request differently by processing tier: flex
 // (cheaper, slower) and priority (pricier, faster) publish their own
 // per-token rates, carried in LiteLLM's data as *_flex and *_priority field
-// variants. [Cost] and [RatesFor] take the [ServiceTier] explicitly —
-// [TierStandard] for ordinary requests; there are no default-tier
-// convenience wrappers.
+// variants. The tier rides on [OpenAIUsage.ServiceTier] — zero value
+// standard — so every provider-specific pricing input lives on its
+// provider's usage type and a flex Claude request is inexpressible;
+// [RatesFor] takes the [ServiceTier] explicitly (a raw lookup with no
+// usage in hand).
 //
-//	llmcost.Cost("gpt-5.5", llmcost.TierFlex, llmcost.OpenAIUsage{...})
+//	llmcost.Cost("gpt-5.5", llmcost.OpenAIUsage{..., ServiceTier: llmcost.TierFlex})
 //
 // The no-fallback rule extends across tiers: a model without priceable rates
 // at the requested tier (e.g. gpt-5.3-codex has no flex rates), a tier
-// missing a rate for a component the usage reports, or a tier string that is
-// not one of the constants — including "" — all return ok=false. Flex or
+// missing a rate for a component the usage reports, or an unrecognized
+// non-empty [OpenAIUsage.ServiceTier] value — all return ok=false. Flex or
 // priority usage is never billed at standard rates; that would be a ~2×
 // error in either direction. Context-window tiers exist within a service
 // tier (*_above_Xk_tokens_priority) and resolve there with the same
