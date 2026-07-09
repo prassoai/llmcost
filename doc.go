@@ -105,16 +105,38 @@
 // of truncating to zero, and any non-zero usage costs at least 1 nls — never
 // silently free.
 //
-// # Model names
+// # Model names and providers
 //
 // Model ids are LiteLLM pricing keys, looked up directly (e.g.
-// "claude-opus-4-8", "gpt-5.4", "codex-mini-latest"). This module owns no
-// alias layer: a consumer with internal model ids owns its own id → LiteLLM
-// key mapping and should test that every id it bills resolves here — that
-// test is the consumer's guarantee that a data sync can't silently drop a
-// model it depends on. A model prices only if LiteLLM lists positive input
-// and output rates for it — entries without pricing (or with zero rates)
-// return ok=false.
+// "claude-opus-4-8", "gpt-5.4", "codex-mini-latest"). Provider differences
+// live in the KEY, not in code: the same vendor model bills differently per
+// serving provider — "gpt-5.4" (OpenAI direct), "azure/gpt-5.4",
+// "azure/us/gpt-5.4" (Azure US data zone, ~10% premium baked into the
+// rates), "vertex_ai/claude-sonnet-4-5", or the AWS model id verbatim on
+// Bedrock — and each is its own table entry.
+//
+// [ModelSelector] owns the key GRAMMAR for Anthropic and OpenAI models
+// across direct, Bedrock, Vertex, Azure OpenAI, and Azure AI Foundry.
+// Key() resolves the provider's NATIVE id verbatim, or the VENDOR's
+// canonical model name through the cloud's bespoke renaming scheme —
+// Bedrock's vendor prefixes, artifact versions (-v1:0), geo profiles and
+// aws-region key forms; Vertex's @date and @default; Azure's gpt-35
+// spelling — so {Bedrock, "claude-sonnet-4-5-20250929"} selects
+// "anthropic.claude-sonnet-4-5-20250929-v1:0" and
+// {Bedrock, "claude-sonnet-4-5", "us"} the us. inference profile.
+// Resolution is deterministic and verified: never guessing (an undated name
+// ambiguous across several dated variants fails), never falling back (a
+// missing Azure region key fails rather than billing the cheaper global
+// key), and never crossing providers (the resolved entry's own
+// litellm_provider must match). TestSelectorCanonicalCoverage gates every
+// data sync on the whole scheme: each cloud-served Anthropic/OpenAI key
+// must remain selectable by its vendor name. This module still owns no
+// fuzzy alias layer: WHICH selectors a consumer bills is the consumer's
+// policy, and the consumer should test that each of its selectors resolves
+// — that test is the guarantee that a data sync can't silently drop a model
+// it depends on. A model prices only if LiteLLM lists positive input and
+// output rates for it — entries without pricing (or with zero rates) return
+// ok=false.
 //
 // # Vendored data
 //
