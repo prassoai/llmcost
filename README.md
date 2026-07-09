@@ -71,10 +71,16 @@ on a component the model has no rate for. Nothing silently bills zero.
   in USD and converted to nls only at the final total, **ceiling-rounded**.
   Sub-nls token costs accumulate correctly; any non-zero usage costs at
   least 1 nls.
-- **No alias layer.** Model ids are LiteLLM keys. A consumer with internal
-  model ids owns its own id → LiteLLM key mapping, and should test that every
-  id it bills resolves here (`RatesFor`) — that test is the consumer's
-  guarantee that a data sync can't silently drop a model it depends on.
+- **Provider in the key, grammar in `ModelSelector`, no fuzzy aliasing.**
+  The same vendor model bills differently per serving provider —
+  `gpt-5.4` vs `azure/gpt-5.4` vs `azure/us/gpt-5.4` (Azure data zones carry
+  a ~10% premium in the rates), Claude direct vs Bedrock AWS ids vs
+  `vertex_ai/…` — each its own key. `ModelSelector{Provider, Model, Region}.Key()`
+  constructs the key **deterministically** from the provider's native model
+  id and verifies it resolves; it never guesses and never falls back (a
+  missing Azure region key fails, not bills the cheaper global key). Which
+  selectors you bill is your policy: test that each resolves — that test is
+  your guarantee that a data sync can't silently drop a model you depend on.
 
 `RatesFor(model)` exposes the raw per-token rates — base and tiers — for
 callers that want them. See `doc.go` for the full contract.
