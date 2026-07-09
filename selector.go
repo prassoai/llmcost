@@ -64,19 +64,49 @@ type ModelSelector struct {
 
 // Key returns the verified LiteLLM pricing key for the selector. ok is false
 // when the selector is malformed — empty model, Region on a provider that
-// does not price by region key, unknown provider — or when the constructed
-// key does not resolve to a priceable model. There is no fallback in any
-// direction: an Azure data-zone deployment whose region key is missing
-// upstream fails rather than billing the ~10%-cheaper global key.
+// does not price by region key, unknown provider — when the constructed key
+// does not resolve to a priceable model, or when the resolved entry belongs
+// to a DIFFERENT provider (by the entry's own litellm_provider). The
+// ownership check closes the verbatim pass-through hole: a prefixed key
+// smuggled into Model ({ProviderOpenAI, "azure/gpt-5.4"}) or a cross-vendor
+// id ({ProviderBedrock, "gpt-5.4"}) constructs a key that resolves — but to
+// an entry another provider bills, and fails here rather than silently
+// billing that provider's rates. There is no fallback in any direction: an
+// Azure data-zone deployment whose region key is missing upstream fails
+// rather than billing the ~10%-cheaper global key.
 func (s ModelSelector) Key() (string, bool) {
 	key, ok := s.key()
 	if !ok {
 		return "", false
 	}
-	if _, ok := table()[key]; !ok {
+	r, ok := table()[key]
+	if !ok || !s.Provider.owns(r.litellmProvider) {
 		return "", false
 	}
 	return key, true
+}
+
+// owns reports whether a table entry with the given upstream
+// litellm_provider is billed by this provider. LiteLLM subdivides some
+// providers, so each case lists its variants; an empty value (entry without
+// litellm_provider) is unowned and never matches.
+func (p Provider) owns(litellmProvider string) bool {
+	switch p {
+	case ProviderOpenAI:
+		return litellmProvider == "openai" || litellmProvider == "text-completion-openai"
+	case ProviderAnthropic:
+		return litellmProvider == "anthropic"
+	case ProviderAzure:
+		return litellmProvider == "azure" || litellmProvider == "azure_text"
+	case ProviderAzureAI:
+		return litellmProvider == "azure_ai"
+	case ProviderBedrock:
+		return litellmProvider == "bedrock" || litellmProvider == "bedrock_converse"
+	case ProviderVertexAI:
+		// vertex_ai, vertex_ai-anthropic_models, vertex_ai-openai_models, …
+		return strings.HasPrefix(litellmProvider, "vertex_ai")
+	}
+	return false
 }
 
 // key is the pure grammar: provider-prefixed deterministic construction,

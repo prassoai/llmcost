@@ -58,6 +58,14 @@ func TestSelectorNeverGuesses(t *testing.T) {
 		"unknown provider":                               {Provider("gemini"), "gemini-2.5-pro", ""},
 		"empty model":                                    {ProviderOpenAI, "", ""},
 		"direct id through the wrong provider":           {ProviderVertexAI, "gpt-5.4", ""},
+		// The provider-ownership check: keys that CONSTRUCT and RESOLVE, but
+		// to an entry billed by a different provider, must fail — never
+		// silently bill that provider's rates.
+		"prefixed key smuggled into Model":    {ProviderOpenAI, "azure/gpt-5.4", ""},
+		"direct openai key through bedrock":   {ProviderBedrock, "gpt-5.4", ""},
+		"bedrock id through anthropic":        {ProviderAnthropic, "anthropic.claude-sonnet-4-5-20250929-v1:0", ""},
+		"cross-vendor: claude through openai": {ProviderOpenAI, "claude-sonnet-4-5", ""},
+		"cross-vendor: gpt through anthropic": {ProviderAnthropic, "gpt-5.4", ""},
 	} {
 		if key, ok := sel.Key(); ok {
 			t.Errorf("%s: %+v resolved to %q; want ok=false", name, sel, key)
@@ -67,23 +75,28 @@ func TestSelectorNeverGuesses(t *testing.T) {
 
 // TestSelectorCoversVendoredKeys is the sync gate for the key grammar: every
 // PRICEABLE Anthropic/OpenAI-vendor key in the vendored data — direct,
-// Bedrock, Vertex, Azure, Azure AI — must be reachable by some selector. If
-// upstream restructures its key scheme (new nesting, a new prefix style),
-// this fails the sync PR instead of silently stranding those models behind
-// an unconstructible key.
+// Bedrock, Vertex, Azure, Azure AI — must be reachable by some selector.
+// Keys are classified by their entry's own litellm_provider (never by key
+// shape — Bedrock ids include vendor-prefixless and "us-gov." geo forms that
+// shape-guessing misses). If upstream restructures its key scheme (new
+// nesting, a new prefix style), this fails the sync PR instead of silently
+// stranding those models behind an unconstructible key.
 func TestSelectorCoversVendoredKeys(t *testing.T) {
-	bedrockID := regexp.MustCompile(`^([a-z]{2,6}\.)?(anthropic|openai)\.`)
 	vendorModel := regexp.MustCompile(`claude|gpt`)
 	covered := 0
-	for key := range table() {
+	for key, r := range table() {
+		if !vendorModel.MatchString(key) {
+			continue
+		}
 		var sels []ModelSelector
-		switch {
-		case bedrockID.MatchString(key):
+		switch lp := r.litellmProvider; {
+		case ProviderOpenAI.owns(lp):
+			sels = []ModelSelector{{Provider: ProviderOpenAI, Model: key}}
+		case ProviderAnthropic.owns(lp):
+			sels = []ModelSelector{{Provider: ProviderAnthropic, Model: key}}
+		case ProviderBedrock.owns(lp):
 			sels = []ModelSelector{{Provider: ProviderBedrock, Model: key}}
-		case strings.HasPrefix(key, "azure/"), strings.HasPrefix(key, "azure_ai/"), strings.HasPrefix(key, "vertex_ai/"):
-			if !vendorModel.MatchString(key) {
-				continue // other vendors' models on these hosts are out of the selector's scope
-			}
+		case ProviderAzure.owns(lp), ProviderAzureAI.owns(lp), ProviderVertexAI.owns(lp):
 			parts := strings.SplitN(key, "/", 3)
 			p := Provider(parts[0])
 			sels = []ModelSelector{{Provider: p, Model: strings.TrimPrefix(key, parts[0]+"/")}}
@@ -91,16 +104,11 @@ func TestSelectorCoversVendoredKeys(t *testing.T) {
 				sels = append(sels, ModelSelector{Provider: p, Model: parts[2], Region: parts[1]})
 			}
 		default:
-			if vendorModel.MatchString(key) && !strings.Contains(key, "/") {
-				sels = []ModelSelector{{Provider: ProviderOpenAI, Model: key}, {Provider: ProviderAnthropic, Model: key}}
-			}
-		}
-		if len(sels) == 0 {
-			continue
+			continue // other hosts of these vendors' models (openrouter, gateways, …) are out of the selector's scope
 		}
 		covered++
 		if !slices.ContainsFunc(sels, func(s ModelSelector) bool { k, ok := s.Key(); return ok && k == key }) {
-			t.Errorf("%s: not reachable by any selector — key grammar drifted from upstream", key)
+			t.Errorf("%s (litellm_provider %s): not reachable by any selector — key grammar drifted from upstream", key, r.litellmProvider)
 		}
 	}
 	// The gate must actually gate: hundreds of Anthropic/OpenAI keys exist

@@ -143,6 +143,12 @@ type Rates struct {
 	Fast           *big.Rat
 	Geo            map[string]*big.Rat
 	RegionalUplift map[string]*big.Rat
+
+	// litellmProvider is the entry's upstream litellm_provider value —
+	// which service bills this key. [ModelSelector.Key] checks it so a
+	// selector can never resolve another provider's entry; absent upstream
+	// means unowned and no selector matches (fail closed).
+	litellmProvider string
 }
 
 // Usage is one response's raw token usage. It is implemented only by
@@ -277,11 +283,12 @@ func RatesFor(model string) (Rates, bool) {
 		return Rates{}, false
 	}
 	out := Rates{
-		Base:           r.Base.clone(),
-		Tiers:          make([]Tier, len(r.Tiers)),
-		Fast:           cpRat(r.Fast),
-		Geo:            cloneRatMap(r.Geo),
-		RegionalUplift: cloneRatMap(r.RegionalUplift),
+		Base:            r.Base.clone(),
+		Tiers:           make([]Tier, len(r.Tiers)),
+		Fast:            cpRat(r.Fast),
+		Geo:             cloneRatMap(r.Geo),
+		RegionalUplift:  cloneRatMap(r.RegionalUplift),
+		litellmProvider: r.litellmProvider,
 	}
 	for i, t := range r.Tiers {
 		out.Tiers[i] = Tier{AbovePromptTokens: t.AbovePromptTokens, TierRates: t.clone()}
@@ -454,6 +461,9 @@ func parseModel(spec json.RawMessage) (Rates, bool) {
 	r := Rates{Base: rates("", TierRates{})}
 	if !r.Base.priceable() {
 		return Rates{}, false
+	}
+	if raw, ok := fields["litellm_provider"]; ok {
+		_ = json.Unmarshal(raw, &r.litellmProvider) // non-string stays "": unowned, no selector matches
 	}
 	r.Fast, r.Geo = parseProviderMultipliers(fields)
 	for key := range fields {
