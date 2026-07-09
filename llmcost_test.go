@@ -404,6 +404,9 @@ func TestInvalidUsagePanics(t *testing.T) {
 	mustPanic("openai negative cached", func() { Cost("gpt-5", OpenAIUsage{CachedInputTokens: -1}) })
 	mustPanic("openai negative output", func() { Cost("gpt-5", OpenAIUsage{OutputTokens: -1}) })
 	mustPanic("openai cached exceeds input", func() { Cost("gpt-5", OpenAIUsage{InputTokens: 10, CachedInputTokens: 11}) })
+	// Usage validation must not be masked by the model lookup: impossible
+	// counts panic even when the model is unknown.
+	mustPanic("unknown model, negative input", func() { Cost("no-such-model", ClaudeUsage{InputTokens: -1}) })
 }
 
 // TestRatParsesDecimalLiteralsExactly encodes the no-float64 requirement:

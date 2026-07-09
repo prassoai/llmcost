@@ -38,7 +38,10 @@ jobs:
           sha=$(gh api repos/BerriAI/litellm/commits/main --jq .sha)
           gh api -H "Accept: application/vnd.github.raw" \
             "repos/BerriAI/litellm/contents/model_prices_and_context_window.json?ref=${sha}" > /tmp/upstream.json
-          jq -e 'type == "object"' /tmp/upstream.json > /dev/null # schema parse: must be a JSON object
+          # No schema check here: it would abort (bash -e) before the PR is
+          # opened. The validation gate below covers it — a malformed or
+          # non-object embed fails go test — so breakage surfaces in a
+          # fixable PR instead of a silently dead workflow run.
           if cmp -s /tmp/upstream.json model_prices_and_context_window.json; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else

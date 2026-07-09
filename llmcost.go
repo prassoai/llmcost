@@ -124,11 +124,12 @@ type Usage interface {
 // any non-zero usage costs at least 1 nls. ok is false if the model is
 // unknown, unpriced, or lacks a rate for a component the usage reports.
 func Cost(model string, u Usage) (Nls, bool) {
+	c := u.disjoint() // before the lookup: impossible counts panic even for unknown models
 	r, ok := table()[model]
 	if !ok {
 		return 0, false
 	}
-	return cost(r, u.disjoint())
+	return cost(r, c)
 }
 
 func (u ClaudeUsage) disjoint() components {
