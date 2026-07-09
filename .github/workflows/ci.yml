@@ -2,6 +2,11 @@ name: ci
 
 on:
   pull_request:
+    # ready_for_review lets the weekly sync PR (opened as a draft by
+    # GITHUB_TOKEN, which cannot trigger workflows) run CI the moment a human
+    # marks it ready — the click is a human actor, so the recursion guard
+    # doesn't apply. See sync.yml (draft: always-true).
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
 
