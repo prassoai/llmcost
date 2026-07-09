@@ -22,6 +22,8 @@ cost, ok := llmcost.Cost("claude-opus-4-8", llmcost.ClaudeUsage{
     CacheCreationInputTokens:   3000,  // usage.cache_creation_input_tokens — TOTAL writes, both TTLs
     CacheCreation1hInputTokens: 1000,  // usage.cache_creation.ephemeral_1h_input_tokens — 1h subset
     OutputTokens:               800,   // usage.output_tokens
+    Speed:                      "",    // the REQUEST's speed param — "fast" bills the 2×–6× fast premium
+    InferenceGeo:               "",    // usage.inference_geo — a pinned region bills its premium (us: 1.1×)
 })
 ```
 
@@ -32,6 +34,7 @@ cost, ok := llmcost.Cost("gpt-5.4", llmcost.OpenAIUsage{
     InputTokens:       46200, // usage.input_tokens — total, cached included
     CachedInputTokens: 45000, // input_tokens_details.cached_tokens — subset
     OutputTokens:      800,   // reasoning tokens are a subset, already included
+    DataResidency:     "",    // "eu"/"us" when served by eu./us.api.openai.com — bills the 1.1× uplift
 })
 ```
 
@@ -54,6 +57,15 @@ on a component the model has no rate for. Nothing silently bills zero.
   request** bills at the tier's rates — not just the excess. Verified against
   LiteLLM's own cost calculator and the providers' billing. Untiered
   components inherit base rates; OpenAI priority/flex tiers are out of scope.
+- **Price multipliers, no silent standard rates.** Anthropic's fast mode
+  (`speed: "fast"`, ×6 on opus-4-6/4-7, ×2 on opus-4-8) and pinned-region
+  inference (`usage.inference_geo`, ×1.1 for `us`) multiply uncached input
+  and output — cache traffic is never scaled — and compose multiplicatively.
+  A mode the model has no factor for *fails* to price: a fast premium is up
+  to 6×, so billing standard rates on a data lag is a silent 6× underbill.
+  OpenAI's data residency (`eu.`/`us.api.openai.com`) uplifts **every**
+  component including cache reads (×1.1 on gpt-5.4/5.5); models OpenAI
+  doesn't regionally price bill standard, as in LiteLLM.
 - **Exact math, ceiling at the total.** Rates parse from decimal literals
   into `math/big.Rat` — never through float64. The response is priced exactly
   in USD and converted to nls only at the final total, **ceiling-rounded**.

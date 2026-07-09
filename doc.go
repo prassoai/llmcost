@@ -23,6 +23,8 @@
 //		CacheCreationInputTokens:   u.CacheCreationInputTokens, // TOTAL cache writes, both TTLs
 //		CacheCreation1hInputTokens: u.CacheCreation.Ephemeral1hInputTokens, // the 1h-TTL subset
 //		OutputTokens:               u.OutputTokens,
+//		Speed:                      speed,          // the REQUEST's speed param: "" or "fast"
+//		InferenceGeo:               u.InferenceGeo, // usage.inference_geo when present
 //	})
 //
 // OpenAI reports overlapping counts — input_tokens INCLUDES cached_tokens:
@@ -31,13 +33,15 @@
 //		InputTokens:       u.InputTokens,       // total input, cached included
 //		CachedInputTokens: u.CachedInputTokens, // the cached subset of InputTokens
 //		OutputTokens:      u.OutputTokens,      // reasoning tokens already included
+//		DataResidency:     residency,           // "eu"/"us" when the host was eu./us.api.openai.com
 //	})
 //
 // Cost returns (Nls, bool): ok=false whenever the response cannot be priced —
-// unknown model, unpriced model, or usage on a component the model has no
-// rate for. Nothing ever silently bills zero or falls back to another
-// component's rate. [RatesFor] exposes the raw per-token rates (base and
-// tiers) for callers that want them.
+// unknown model, unpriced model, usage on a component the model has no rate
+// for, or a mode (fast, pinned geo) the model has no multiplier for. Nothing
+// ever silently bills zero or falls back to another component's rate.
+// [RatesFor] exposes the raw per-token rates (base, tiers, and multipliers)
+// for callers that want them.
 //
 // # Cache pricing
 //
@@ -62,6 +66,34 @@
 // cache, and output token — bills at the tier's rates, not just the excess.
 // A component upstream leaves untiered inherits its base rate. OpenAI's
 // priority/flex service tiers are out of scope (standard tier only).
+//
+// # Price multipliers — fast mode, pinned geo, data residency
+//
+// Three request modes multiply the per-token rates; each is priced exactly
+// as LiteLLM's calculator prices it from the same data.
+//
+// Anthropic's fast mode (request speed:"fast") bills uncached input and
+// output at the model's fast multiplier — 6× on claude-opus-4-6/4-7, 2× on
+// claude-opus-4-8 — and Anthropic's pinned-region inference
+// (usage.inference_geo, e.g. "us") at the model's geo multiplier (1.1×).
+// The two compose multiplicatively; cache reads and writes bill UNSCALED in
+// both modes. A fast response on a model without fast pricing, a pinned geo
+// without a factor, or an unrecognized Speed value fails to price: these
+// premiums reach 6×, so billing standard rates on a pricing-data lag is
+// exactly the silent underbill this module exists to prevent. The unpinned
+// geos "global" and "not_available" carry no premium.
+//
+// OpenAI's data residency (OpenAIUsage.DataResidency — "eu"/"us" when the
+// request was served by eu./us.api.openai.com) bills EVERY component, cache
+// reads included, at the model's regional-processing uplift (1.1× on the
+// gpt-5.4/5.5 family). Unlike the response-asserted Anthropic modes,
+// residency is a caller-stated transport fact that holds for every model
+// while OpenAI publishes the uplift only for the models it regionally
+// prices — so a model without an uplift for the region bills at standard
+// rates rather than failing, matching LiteLLM.
+//
+// Multipliers scale the tier-resolved rates; tier selection itself is a
+// pure function of token counts.
 //
 // # Precision and rounding
 //
