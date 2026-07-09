@@ -30,7 +30,8 @@ const sonnet45Spec = `{
 }`
 
 // gpt54Spec mirrors gpt-5.4: OpenAI-style — cache reads but no cache
-// creation, tiered above 272k prompt tokens.
+// creation, tiered above 272k prompt tokens, with the 1.1× regional-
+// processing uplift OpenAI charges on its eu./us. data-residency hosts.
 const gpt54Spec = `{
 	"input_cost_per_token": 2.5e-06,
 	"cache_read_input_token_cost": 2.5e-07,
@@ -40,7 +41,23 @@ const gpt54Spec = `{
 	"output_cost_per_token_above_272k_tokens": 2.25e-05,
 	"cache_read_input_token_cost_priority": 5e-07,
 	"input_cost_per_token_above_272k_tokens_priority": 1e-05,
+	"regional_processing_uplift_multiplier_eu": 1.1,
+	"regional_processing_uplift_multiplier_us": 1.1,
 	"litellm_provider": "openai"
+}`
+
+// opus46Spec mirrors claude-opus-4-6: $5/M input, $0.50/M cache read,
+// $6.25/M 5-minute cache write, $10/M 1-hour cache write, $25/M output, and
+// LiteLLM's provider_specific_entry price multipliers — 6× for fast mode,
+// 1.1× for us-pinned inference — which scale uncached input and output only.
+const opus46Spec = `{
+	"input_cost_per_token": 5e-06,
+	"cache_read_input_token_cost": 5e-07,
+	"cache_creation_input_token_cost": 6.25e-06,
+	"cache_creation_input_token_cost_above_1hr": 1e-05,
+	"output_cost_per_token": 2.5e-05,
+	"provider_specific_entry": {"us": 1.1, "fast": 6.0},
+	"litellm_provider": "anthropic"
 }`
 
 func mustParse(t *testing.T, spec string) Rates {
@@ -57,6 +74,17 @@ func mustParseTiers(t *testing.T, spec string) map[ServiceTier]Rates {
 	return m
 }
 
+// price runs the full internal pipeline — normalization, premium resolution,
+// costing — against fixture rates: exactly what Cost does after the table
+// lookup.
+func price(r Rates, u Usage) (Nls, bool) {
+	p, ok := u.premium(r)
+	if !ok {
+		return 0, false
+	}
+	return cost(r, u.disjoint(), p)
+}
+
 // TestExactCost encodes the core requirement: a response is priced as
 // Σ rate × tokens over all four components — uncached input, cache reads at
 // the real cache-read rate (0.1× input), cache writes at the real
@@ -64,7 +92,7 @@ func mustParseTiers(t *testing.T, spec string) map[ServiceTier]Rates {
 // landing on an nls boundary returned as-is. 1000×3e-6 + 30000×3e-7 +
 // 2000×3.75e-6 + 100×1.5e-5 = $0.021 = exactly 2100 nls.
 func TestExactCost(t *testing.T) {
-	got, ok := cost(mustParse(t, sonnet45Spec), components{input: 1000, cacheRead: 30000, cacheCreation: 2000, output: 100})
+	got, ok := cost(mustParse(t, sonnet45Spec), components{input: 1000, cacheRead: 30000, cacheCreation: 2000, output: 100}, premium{})
 	if !ok || got != 2100 {
 		t.Fatalf("cost = %d, %v; want 2100, true", got, ok)
 	}
@@ -81,14 +109,14 @@ func TestTieredPricing(t *testing.T) {
 
 	// Exactly at the threshold: prompt = 150000 + 50000 = 200000, NOT above.
 	// Base rates: 150000×3e-6 + 50000×3e-7 + 1000×1.5e-5 = $0.48 = 48000 nls.
-	if got, ok := cost(r, components{input: 150000, cacheRead: 50000, output: 1000}); !ok || got != 48000 {
+	if got, ok := cost(r, components{input: 150000, cacheRead: 50000, output: 1000}, premium{}); !ok || got != 48000 {
 		t.Fatalf("at threshold: cost = %d, %v; want 48000, true", got, ok)
 	}
 
 	// One token more: prompt = 200001 > 200000 — the whole request re-rates.
 	// 150001×6e-6 + 50000×6e-7 + 1000×2.25e-5 = $0.952506 → ceil = 95251 nls.
 	// Marginal-only billing would give ~48000; whole-request is nearly 2×.
-	if got, ok := cost(r, components{input: 150001, cacheRead: 50000, output: 1000}); !ok || got != 95251 {
+	if got, ok := cost(r, components{input: 150001, cacheRead: 50000, output: 1000}, premium{}); !ok || got != 95251 {
 		t.Fatalf("above threshold: cost = %d, %v; want 95251, true", got, ok)
 	}
 }
@@ -106,7 +134,7 @@ func TestTierInheritsBaseRates(t *testing.T) {
 	}`)
 	// prompt = 200000 > 128000 → tiered input, but output has no tier rate:
 	// 200000×2e-6 + 1000×2e-6 (base) = $0.402 = 40200 nls.
-	if got, ok := cost(r, components{input: 200000, output: 1000}); !ok || got != 40200 {
+	if got, ok := cost(r, components{input: 200000, output: 1000}, premium{}); !ok || got != 40200 {
 		t.Fatalf("cost = %d, %v; want 40200, true", got, ok)
 	}
 }
@@ -124,10 +152,10 @@ func TestTierOnlyCacheCreation(t *testing.T) {
 		"cache_creation_input_token_cost_above_200k_tokens": 2.5e-07,
 		"output_cost_per_token_above_200k_tokens": 1.5e-05
 	}`)
-	if _, ok := cost(r, components{input: 1000, cacheCreation: 500}); ok {
+	if _, ok := cost(r, components{input: 1000, cacheCreation: 500}, premium{}); ok {
 		t.Fatal("cache writes priced below threshold despite no base cache-creation rate")
 	}
-	if _, ok := cost(r, components{input: 250000, cacheCreation: 500}); !ok {
+	if _, ok := cost(r, components{input: 250000, cacheCreation: 500}, premium{}); !ok {
 		t.Fatal("cache writes not priced above threshold despite tiered cache-creation rate")
 	}
 }
@@ -139,12 +167,12 @@ func TestTierOnlyCacheCreation(t *testing.T) {
 // would give 750, at the 1h rate 1200. Cost with ClaudeUsage takes the API's raw shape —
 // total writes plus the 1h subset — and splits internally.
 func TestCacheWriteTTLSplit(t *testing.T) {
-	got, ok := cost(mustParse(t, sonnet45Spec), components{cacheCreation: 1500, cacheCreation1h: 500})
+	got, ok := cost(mustParse(t, sonnet45Spec), components{cacheCreation: 1500, cacheCreation1h: 500}, premium{})
 	if !ok || got != 863 {
 		t.Fatalf("cost = %d, %v; want 863, true", got, ok)
 	}
 	viaAPI, ok2 := Cost("claude-sonnet-4-5", ClaudeUsage{CacheCreationInputTokens: 2000, CacheCreation1hInputTokens: 500})
-	direct, ok3 := cost(table()["claude-sonnet-4-5"][TierStandard], components{cacheCreation: 1500, cacheCreation1h: 500})
+	direct, ok3 := cost(table()["claude-sonnet-4-5"][TierStandard], components{cacheCreation: 1500, cacheCreation1h: 500}, premium{})
 	if !ok2 || !ok3 || viaAPI != direct {
 		t.Fatalf("Cost(ClaudeUsage) = %d, %v; internal = %d, %v; want equal and ok", viaAPI, ok2, direct, ok3)
 	}
@@ -156,7 +184,7 @@ func TestCacheWriteTTLSplit(t *testing.T) {
 // alone exceed 200k, so the whole request bills at the tiered 1h rate.
 // 200001×1.2e-5 = $2.400012 → 240001.2 nls → ceil 240002.
 func TestCacheWrite1hTiered(t *testing.T) {
-	got, ok := cost(mustParse(t, sonnet45Spec), components{cacheCreation1h: 200001})
+	got, ok := cost(mustParse(t, sonnet45Spec), components{cacheCreation1h: 200001}, premium{})
 	if !ok || got != 240002 {
 		t.Fatalf("cost = %d, %v; want 240002, true", got, ok)
 	}
@@ -168,25 +196,25 @@ func TestCacheWrite1hTiered(t *testing.T) {
 // Zero counts on the unpriced component still price fine.
 func TestNoCacheRateFallback(t *testing.T) {
 	r := mustParse(t, `{"input_cost_per_token": 1e-06, "output_cost_per_token": 2e-06}`)
-	if _, ok := cost(r, components{input: 100, cacheRead: 1}); ok {
+	if _, ok := cost(r, components{input: 100, cacheRead: 1}, premium{}); ok {
 		t.Fatal("cache reads priced despite model having no cache-read rate")
 	}
-	if _, ok := cost(r, components{input: 100, cacheCreation: 1}); ok {
+	if _, ok := cost(r, components{input: 100, cacheCreation: 1}, premium{}); ok {
 		t.Fatal("cache writes priced despite model having no cache-creation rate")
 	}
-	if _, ok := cost(r, components{input: 100, cacheCreation1h: 1}); ok {
+	if _, ok := cost(r, components{input: 100, cacheCreation1h: 1}, premium{}); ok {
 		t.Fatal("1h cache writes priced despite model having no 1h cache-creation rate")
 	}
 	// A model priced only for 5m writes must not bill 1h writes at the 5m rate.
 	fiveMinOnly := mustParse(t, `{"input_cost_per_token": 1e-06, "cache_creation_input_token_cost": 1.25e-06, "output_cost_per_token": 2e-06}`)
-	if _, ok := cost(fiveMinOnly, components{cacheCreation1h: 1}); ok {
+	if _, ok := cost(fiveMinOnly, components{cacheCreation1h: 1}, premium{}); ok {
 		t.Fatal("1h cache writes priced despite model having only a 5m cache-creation rate")
 	}
-	if got, ok := cost(r, components{input: 100}); !ok || got != 10 {
+	if got, ok := cost(r, components{input: 100}, premium{}); !ok || got != 10 {
 		t.Fatalf("cost without cache usage = %d, %v; want 10, true", got, ok)
 	}
 	// OpenAI models lack cache-creation by design; reads-only must price.
-	if _, ok := cost(mustParse(t, gpt54Spec), components{input: 600, cacheRead: 400}); !ok {
+	if _, ok := cost(mustParse(t, gpt54Spec), components{input: 600, cacheRead: 400}, premium{}); !ok {
 		t.Fatal("OpenAI-shaped model failed to price cache reads")
 	}
 }
@@ -201,7 +229,7 @@ func TestNoCacheRateFallback(t *testing.T) {
 // their own tests.
 func TestExplicitZeroCacheRateIsFree(t *testing.T) {
 	r := mustParse(t, `{"input_cost_per_token": 1e-06, "output_cost_per_token": 2e-06, "cache_creation_input_token_cost": 0.0}`)
-	if got, ok := cost(r, components{input: 100, cacheCreation: 5000}); !ok || got != 10 {
+	if got, ok := cost(r, components{input: 100, cacheCreation: 5000}, premium{}); !ok || got != 10 {
 		t.Fatalf("cost = %d, %v; want 10, true (free cache writes bill $0, input still bills)", got, ok)
 	}
 }
@@ -212,13 +240,13 @@ func TestExplicitZeroCacheRateIsFree(t *testing.T) {
 // 600×2.5e-6 + 400×2.5e-7 + 100×1.5e-5 = $0.0031 = 310 nls. Billing all 1000
 // at the input rate (double-counting) would give 360.
 func TestOpenAINormalization(t *testing.T) {
-	got, ok := cost(mustParse(t, gpt54Spec), components{input: 600, cacheRead: 400, output: 100})
+	got, ok := cost(mustParse(t, gpt54Spec), components{input: 600, cacheRead: 400, output: 100}, premium{})
 	if !ok || got != 310 {
 		t.Fatalf("cost = %d, %v; want 310, true", got, ok)
 	}
 	// The exported entry point must produce the same normalization from raw counts.
 	viaAPI, ok2 := Cost("gpt-5.4", OpenAIUsage{InputTokens: 1000, CachedInputTokens: 400, OutputTokens: 100})
-	direct, ok3 := cost(table()["gpt-5.4"][TierStandard], components{input: 600, cacheRead: 400, output: 100})
+	direct, ok3 := cost(table()["gpt-5.4"][TierStandard], components{input: 600, cacheRead: 400, output: 100}, premium{})
 	if !ok2 || !ok3 || viaAPI != direct {
 		t.Fatalf("Cost(OpenAIUsage) = %d, %v; internal = %d, %v; want equal and ok", viaAPI, ok2, direct, ok3)
 	}
@@ -229,7 +257,7 @@ func TestOpenAINormalization(t *testing.T) {
 // which 272000 cached exceeds the 272k tier even though only 1 token is
 // uncached. 1×5e-6 + 272000×5e-7 = $0.136005 → ceil = 13601 nls.
 func TestOpenAITierCountsCachedTokens(t *testing.T) {
-	got, ok := cost(mustParse(t, gpt54Spec), components{input: 1, cacheRead: 272000})
+	got, ok := cost(mustParse(t, gpt54Spec), components{input: 1, cacheRead: 272000}, premium{})
 	if !ok || got != 13601 {
 		t.Fatalf("cost = %d, %v; want 13601, true", got, ok)
 	}
@@ -273,7 +301,7 @@ func TestServiceTierCost(t *testing.T) {
 		if !ok {
 			t.Fatalf("%s tier did not parse", tier)
 		}
-		if got, ok := cost(r, c); !ok || got != want {
+		if got, ok := cost(r, c, premium{}); !ok || got != want {
 			t.Errorf("%s: cost = %d, %v; want %d, true", tier, got, ok, want)
 		}
 	}
@@ -297,10 +325,10 @@ func TestServiceTierCost(t *testing.T) {
 //	                       standard base 3e-5 would give 547002)
 func TestPriorityContextTier(t *testing.T) {
 	r := mustParseTiers(t, gpt55Spec)[TierPriority]
-	if got, ok := cost(r, components{input: 272000, output: 1000}); !ok || got != 278000 {
+	if got, ok := cost(r, components{input: 272000, output: 1000}, premium{}); !ok || got != 278000 {
 		t.Fatalf("at threshold: cost = %d, %v; want 278000, true", got, ok)
 	}
-	if got, ok := cost(r, components{input: 272001, output: 1000}); !ok || got != 550002 {
+	if got, ok := cost(r, components{input: 272001, output: 1000}, premium{}); !ok || got != 550002 {
 		t.Fatalf("above threshold: cost = %d, %v; want 550002, true", got, ok)
 	}
 }
@@ -335,11 +363,11 @@ func TestServiceTierNoCrossFallback(t *testing.T) {
 	if !ok {
 		t.Fatal("flex tier with its own input+output rates did not parse")
 	}
-	if _, ok := cost(flex, components{input: 100, cacheRead: 1}); ok {
+	if _, ok := cost(flex, components{input: 100, cacheRead: 1}, premium{}); ok {
 		t.Error("flex cache reads priced despite no flex cache-read rate")
 	}
 	// 100×5e-7 + 50×1e-6 = $0.0001 = exactly 10 nls: the tier's own rates apply.
-	if got, ok := cost(flex, components{input: 100, output: 50}); !ok || got != 10 {
+	if got, ok := cost(flex, components{input: 100, output: 50}, premium{}); !ok || got != 10 {
 		t.Errorf("flex without cache usage = %d, %v; want 10, true", got, ok)
 	}
 }
@@ -359,6 +387,126 @@ func TestUnknownServiceTier(t *testing.T) {
 	}
 }
 
+// TestClaudeFastMode encodes Anthropic fast-mode pricing (LiteLLM's
+// provider_specific_entry.fast): a speed:"fast" request bills uncached input
+// and output at the fast multiplier (6× on opus-4-6) while cache reads and
+// writes bill UNSCALED — Anthropic does not premium-price cache traffic, and
+// LiteLLM's calculator excludes cache costs from the multiplier the same
+// way. Standard: 1000×5e-6 + 30000×5e-7 + 2000×6.25e-6 + 100×2.5e-5 =
+// $0.035 = 3500 nls. Fast: only input and output scale ×6 → 0.03 + 0.015 +
+// 0.0125 + 0.015 = $0.0725 = 7250 nls (scaling cache too would give $0.21).
+func TestClaudeFastMode(t *testing.T) {
+	r := mustParse(t, opus46Spec)
+	u := ClaudeUsage{InputTokens: 1000, CacheReadInputTokens: 30000, CacheCreationInputTokens: 2000, OutputTokens: 100}
+	if got, ok := price(r, u); !ok || got != 3500 {
+		t.Fatalf("standard = %d, %v; want 3500, true", got, ok)
+	}
+	u.Speed = "fast"
+	if got, ok := price(r, u); !ok || got != 7250 {
+		t.Fatalf("fast = %d, %v; want 7250, true", got, ok)
+	}
+	// The exported entry point resolves the same premium from the same raw usage.
+	viaAPI, ok := Cost("claude-opus-4-6", u)
+	direct, ok2 := price(table()["claude-opus-4-6"][TierStandard], u)
+	if !ok || !ok2 || viaAPI != direct {
+		t.Fatalf("Cost(fast) = %d, %v; internal = %d, %v; want equal and ok", viaAPI, ok, direct, ok2)
+	}
+}
+
+// TestClaudeInferenceGeo encodes regional-inference pricing
+// (usage.inference_geo): a response pinned to a region bills uncached input
+// and output at the geo multiplier (1.1× for "us" on opus-4-6), matched
+// case-insensitively as in LiteLLM; the API's unpinned values — "global",
+// "not_available", and absent — never carry a premium. (1000×5e-6 +
+// 100×2.5e-5) × 1.1 = $0.00825 = 825 nls; unpinned $0.0075 = 750 nls.
+func TestClaudeInferenceGeo(t *testing.T) {
+	r := mustParse(t, opus46Spec)
+	for geo, want := range map[string]Nls{"us": 825, "US": 825, "": 750, "global": 750, "not_available": 750} {
+		got, ok := price(r, ClaudeUsage{InputTokens: 1000, OutputTokens: 100, InferenceGeo: geo})
+		if !ok || got != want {
+			t.Errorf("geo %q = %d, %v; want %d, true", geo, got, ok, want)
+		}
+	}
+}
+
+// TestClaudeFastGeoCompose encodes that the fast and geo premiums compose
+// multiplicatively, as in LiteLLM: fast us-pinned opus-4-6 bills 6 × 1.1 =
+// 6.6×. (1000×5e-6 + 100×2.5e-5) × 6.6 = $0.0495 = 4950 nls.
+func TestClaudeFastGeoCompose(t *testing.T) {
+	got, ok := price(mustParse(t, opus46Spec), ClaudeUsage{InputTokens: 1000, OutputTokens: 100, Speed: "fast", InferenceGeo: "us"})
+	if !ok || got != 4950 {
+		t.Fatalf("fast+us = %d, %v; want 4950, true", got, ok)
+	}
+}
+
+// TestUnpricedModeFails encodes the no-silent-standard-rate requirement: a
+// mode the model has no multiplier for must FAIL, never bill unscaled —
+// fast premiums reach 6×, so billing standard rates on a data lag is a 6×
+// underbill. Fast on a model without fast pricing fails, a pinned geo
+// without a factor fails, and an unrecognized speed value fails. (LiteLLM
+// bills all three at standard rates — exactly the underbilling class this
+// module refuses.) The unpremiumed request values — Speed "" and "standard",
+// unpinned geos — price normally.
+func TestUnpricedModeFails(t *testing.T) {
+	noMult := mustParse(t, sonnet45Spec) // no provider_specific_entry
+	if _, ok := price(noMult, ClaudeUsage{InputTokens: 1, Speed: "fast"}); ok {
+		t.Error("fast priced despite model having no fast multiplier")
+	}
+	if _, ok := price(noMult, ClaudeUsage{InputTokens: 1, InferenceGeo: "us"}); ok {
+		t.Error("us-pinned inference priced despite model having no geo multiplier")
+	}
+	r := mustParse(t, opus46Spec)
+	if _, ok := price(r, ClaudeUsage{InputTokens: 1, InferenceGeo: "eu"}); ok {
+		t.Error("eu-pinned inference priced despite model having only a us multiplier")
+	}
+	if _, ok := price(r, ClaudeUsage{InputTokens: 1, Speed: "turbo"}); ok {
+		t.Error("unrecognized speed priced")
+	}
+	for _, speed := range []string{"", "standard"} {
+		if got, ok := price(r, ClaudeUsage{InputTokens: 1000, Speed: speed}); !ok || got != 500 {
+			t.Errorf("speed %q = %d, %v; want 500, true", speed, got, ok)
+		}
+	}
+}
+
+// TestOpenAIRegionalUplift encodes OpenAI data-residency pricing
+// (regional_processing_uplift_multiplier_eu/us): a request served by a
+// regionalized host bills EVERY component — cache reads included — at the
+// uplift, unlike Anthropic's cache-exempt multipliers. (600×2.5e-6 +
+// 400×2.5e-7 + 100×1.5e-5) × 1.1 = $0.00341 = 341 nls; the global host
+// bills $0.0031 = 310 nls. A region the model has no uplift for bills
+// standard rates — OpenAI publishes the uplift per model, residency is a
+// transport fact that holds for every model, and LiteLLM prices absent
+// uplifts the same way (see the DataResidency field doc).
+func TestOpenAIRegionalUplift(t *testing.T) {
+	r := mustParse(t, gpt54Spec)
+	for region, want := range map[string]Nls{"eu": 341, "EU": 341, "us": 341, "": 310, "jp": 310} {
+		got, ok := price(r, OpenAIUsage{InputTokens: 1000, CachedInputTokens: 400, OutputTokens: 100, DataResidency: region})
+		if !ok || got != want {
+			t.Errorf("residency %q = %d, %v; want %d, true", region, got, ok, want)
+		}
+	}
+	// The exported entry point resolves the same premium from the same raw usage.
+	u := OpenAIUsage{InputTokens: 1000, CachedInputTokens: 400, OutputTokens: 100, DataResidency: "eu"}
+	viaAPI, ok := Cost("gpt-5.4", u)
+	direct, ok2 := price(table()["gpt-5.4"][TierStandard], u)
+	if !ok || !ok2 || viaAPI != direct {
+		t.Fatalf("Cost(eu) = %d, %v; internal = %d, %v; want equal and ok", viaAPI, ok, direct, ok2)
+	}
+}
+
+// TestUpliftScalesTierRates encodes multiplier × tier composition: premiums
+// scale the TIER-RESOLVED rates, while tier selection stays a pure function
+// of token counts. 272001 prompt tokens exceed gpt-5.4's 272k tier; served
+// from the eu host: (1×5e-6 + 272000×5e-7) × 1.1 = $0.1496055 → 14960.55
+// nls → ceil 14961.
+func TestUpliftScalesTierRates(t *testing.T) {
+	got, ok := price(mustParse(t, gpt54Spec), OpenAIUsage{InputTokens: 272001, CachedInputTokens: 272000, DataResidency: "eu"})
+	if !ok || got != 14961 {
+		t.Fatalf("cost = %d, %v; want 14961, true", got, ok)
+	}
+}
+
 // TestCeilingRounding encodes the rounding rule: the final total — and only
 // the final total — is ceiling-rounded. Any non-zero usage costs at least
 // 1 nls: a single cache-read token at $3e-7 is 0.03 nls, never free. And
@@ -367,13 +515,13 @@ func TestUnknownServiceTier(t *testing.T) {
 // would inflate to 400.
 func TestCeilingRounding(t *testing.T) {
 	r := mustParse(t, sonnet45Spec)
-	if got, ok := cost(r, components{cacheRead: 1}); !ok || got != 1 {
+	if got, ok := cost(r, components{cacheRead: 1}, premium{}); !ok || got != 1 {
 		t.Fatalf("1 cache-read token = %d, %v; want 1 (ceil of 0.03)", got, ok)
 	}
-	if got, ok := cost(r, components{cacheRead: 400}); !ok || got != 12 {
+	if got, ok := cost(r, components{cacheRead: 400}, premium{}); !ok || got != 12 {
 		t.Fatalf("400 cache-read tokens = %d, %v; want exactly 12", got, ok)
 	}
-	if got, ok := cost(r, components{}); !ok || got != 0 {
+	if got, ok := cost(r, components{}, premium{}); !ok || got != 0 {
 		t.Fatalf("zero usage = %d, %v; want 0, true (ceiling never invents cost)", got, ok)
 	}
 }
@@ -431,6 +579,16 @@ func TestTableInvariants(t *testing.T) {
 					t.Errorf("%s/%s: unpriceable tier rates in table", model, tier)
 				}
 			}
+			if r.Fast != nil && r.Fast.Sign() <= 0 {
+				t.Errorf("%s/%s: non-positive fast multiplier", model, tier)
+			}
+			for _, m := range []map[string]*big.Rat{r.Geo, r.RegionalUplift} {
+				for key, f := range m {
+					if f == nil || f.Sign() <= 0 {
+						t.Errorf("%s/%s: non-positive multiplier %q", model, tier, key)
+					}
+				}
+			}
 		}
 	}
 }
@@ -474,6 +632,16 @@ func TestVendoredDataCanaries(t *testing.T) {
 			}
 		}
 	}
+	// Multiplier canaries: opus-4-8's fast/us factors and gpt-5.4's regional
+	// uplifts must parse. If these vanish after a sync, fast-mode and pinned-
+	// geo usage starts failing (never underbilling) and residency usage
+	// starts billing standard — verify against upstream before merging.
+	if r, ok := RatesFor("claude-opus-4-8"); !ok || r.Fast == nil || r.Fast.Cmp(big.NewRat(2, 1)) != 0 || r.Geo["us"] == nil {
+		t.Errorf("claude-opus-4-8 multipliers = fast %v, geo %v; want fast 2 and a us factor", r.Fast, r.Geo)
+	}
+	if r, ok := RatesFor("gpt-5.4"); !ok || r.RegionalUplift["eu"] == nil || r.RegionalUplift["us"] == nil {
+		t.Errorf("gpt-5.4 regional uplifts = %v; want eu and us factors", r.RegionalUplift)
+	}
 }
 
 // TestCostMatchesRatesFor encodes that the exported views never disagree:
@@ -489,7 +657,7 @@ func TestCostMatchesRatesFor(t *testing.T) {
 				{input: 3117, cacheRead: 41775, cacheCreation: 2048, cacheCreation1h: 512, output: 977},
 				{input: 300000, cacheRead: 41775, output: 977}, // above any 200k/272k tier
 			} {
-				want, wantOK := cost(r, c)
+				want, wantOK := cost(r, c, premium{})
 				got, gotOK := CostTier(model, tier, ClaudeUsage{
 					InputTokens:                c.input,
 					CacheReadInputTokens:       c.cacheRead,
@@ -512,25 +680,41 @@ func TestCostMatchesRatesFor(t *testing.T) {
 }
 
 // TestRatesForReturnsCopies encodes that the shared rate table is immutable:
-// a caller mutating the rats RatesFor returned — base or tier — must not
-// corrupt later costs of the same model.
+// a caller mutating the rats RatesFor returned — base, tier, or multiplier —
+// must not corrupt later costs of the same model.
 func TestRatesForReturnsCopies(t *testing.T) {
-	u := ClaudeUsage{InputTokens: 250000} // in sonnet-4-5's premium tier, so tier rats are exercised too
-	before, _ := Cost("claude-sonnet-4-5", u)
-	r, _ := RatesFor("claude-sonnet-4-5")
-	all := []TierRates{r.Base}
-	for _, tier := range r.Tiers {
-		all = append(all, tier.TierRates)
-	}
-	for _, tr := range all {
-		for _, rat := range []*big.Rat{tr.Input, tr.CacheRead, tr.CacheCreation, tr.CacheCreation1h, tr.Output} {
-			if rat != nil {
+	for _, tc := range []struct {
+		model string
+		u     Usage
+	}{
+		{"claude-sonnet-4-5", ClaudeUsage{InputTokens: 250000}},                                  // premium-tier rats exercised
+		{"claude-opus-4-8", ClaudeUsage{InputTokens: 1000, Speed: "fast", InferenceGeo: "us"}},   // fast and geo rats exercised
+		{"gpt-5.4", OpenAIUsage{InputTokens: 1000, CachedInputTokens: 400, DataResidency: "eu"}}, // uplift rat exercised
+	} {
+		before, _ := Cost(tc.model, tc.u)
+		r, _ := RatesFor(tc.model)
+		all := []TierRates{r.Base}
+		for _, tier := range r.Tiers {
+			all = append(all, tier.TierRates)
+		}
+		for _, tr := range all {
+			for _, rat := range []*big.Rat{tr.Input, tr.CacheRead, tr.CacheCreation, tr.CacheCreation1h, tr.Output} {
+				if rat != nil {
+					rat.SetInt64(999)
+				}
+			}
+		}
+		if r.Fast != nil {
+			r.Fast.SetInt64(999)
+		}
+		for _, m := range []map[string]*big.Rat{r.Geo, r.RegionalUplift} {
+			for _, rat := range m {
 				rat.SetInt64(999)
 			}
 		}
-	}
-	if after, _ := Cost("claude-sonnet-4-5", u); after != before {
-		t.Fatalf("mutating RatesFor result changed Cost: %d -> %d", before, after)
+		if after, _ := Cost(tc.model, tc.u); after != before {
+			t.Fatalf("%s: mutating RatesFor result changed Cost: %d -> %d", tc.model, before, after)
+		}
 	}
 }
 

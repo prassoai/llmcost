@@ -22,6 +22,8 @@ cost, ok := llmcost.Cost("claude-opus-4-8", llmcost.ClaudeUsage{
     CacheCreationInputTokens:   3000,  // usage.cache_creation_input_tokens — TOTAL writes, both TTLs
     CacheCreation1hInputTokens: 1000,  // usage.cache_creation.ephemeral_1h_input_tokens — 1h subset
     OutputTokens:               800,   // usage.output_tokens
+    Speed:                      "",    // the REQUEST's speed param — "fast" bills the 2×–6× fast premium
+    InferenceGeo:               "",    // usage.inference_geo — a pinned region bills its premium (us: 1.1×)
 })
 ```
 
@@ -32,6 +34,7 @@ cost, ok := llmcost.Cost("gpt-5.4", llmcost.OpenAIUsage{
     InputTokens:       46200, // usage.input_tokens — total, cached included
     CachedInputTokens: 45000, // input_tokens_details.cached_tokens — subset
     OutputTokens:      800,   // reasoning tokens are a subset, already included
+    DataResidency:     "",    // "eu"/"us" when served by eu./us.api.openai.com — bills the 1.1× uplift
 })
 ```
 
@@ -79,15 +82,39 @@ modeled.
   LiteLLM's own cost calculator and the providers' billing. Untiered
   components inherit the priced service tier's base rates — never another
   service tier's.
+- **Price multipliers, no silent standard rates.** Anthropic's fast mode
+  (`speed: "fast"`, ×6 on opus-4-6/4-7, ×2 on opus-4-8) and pinned-region
+  inference (`usage.inference_geo`, ×1.1 for `us`) multiply uncached input
+  and output — cache traffic is never scaled — and compose multiplicatively.
+  A mode the model has no factor for *fails* to price: a fast premium is up
+  to 6×, so billing standard rates on a data lag is a silent 6× underbill.
+  OpenAI's data residency (`eu.`/`us.api.openai.com`) uplifts **every**
+  component including cache reads (×1.1 on gpt-5.4/5.5); models OpenAI
+  doesn't regionally price bill standard, as in LiteLLM. Multipliers scale
+  the rates of whichever service tier is being priced.
 - **Exact math, ceiling at the total.** Rates parse from decimal literals
   into `math/big.Rat` — never through float64. The response is priced exactly
   in USD and converted to nls only at the final total, **ceiling-rounded**.
   Sub-nls token costs accumulate correctly; any non-zero usage costs at
   least 1 nls.
-- **No alias layer.** Model ids are LiteLLM keys. A consumer with internal
-  model ids owns its own id → LiteLLM key mapping, and should test that every
-  id it bills resolves here (`RatesFor`) — that test is the consumer's
-  guarantee that a data sync can't silently drop a model it depends on.
+- **Provider in the key, grammar in `ModelSelector`, no fuzzy aliasing.**
+  The same vendor model bills differently per serving provider —
+  `gpt-5.4` vs `azure/gpt-5.4` vs `azure/us/gpt-5.4` (Azure data zones carry
+  a ~10% premium in the rates), Claude direct vs Bedrock AWS ids vs
+  `vertex_ai/…` — each its own key. `ModelSelector{Provider, Model, Region}.Key()`
+  resolves the provider's **native id** verbatim or the **vendor's canonical
+  name** through each cloud's bespoke renaming scheme (Bedrock's
+  `anthropic.` prefix, `-v1:0` artifact versions, `us.` geo profiles;
+  Vertex's `@date`/`@default`; Azure's `gpt-35` spelling):
+  `{Bedrock, "claude-sonnet-4-5", "us"}` →
+  `us.anthropic.claude-sonnet-4-5-20250929-v1:0`. Resolution is
+  **deterministic and verified** — an ambiguous undated name fails, a
+  missing region key fails (never the cheaper global key), a cross-provider
+  key fails — and `TestSelectorCanonicalCoverage` gates every data sync on
+  the whole scheme: each cloud-served Anthropic/OpenAI key must stay
+  selectable by its vendor name. Which selectors you bill is your policy:
+  test that each resolves — that test is your guarantee that a data sync
+  can't silently drop a model you depend on.
 
 `RatesFor(model)` / `RatesForTier(model, tier)` expose the raw per-token
 rates — base and tiers — for callers that want them. See `doc.go` for the

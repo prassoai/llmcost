@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 )
 
@@ -64,12 +65,29 @@ const (
 // impossible in a real response and panics. The request's total prompt size —
 // which decides context-window pricing tiers — is InputTokens +
 // CacheReadInputTokens + CacheCreationInputTokens, computed internally.
+//
+// Two non-count fields carry the request's price-multiplying modes:
+//
+//	Speed        = the REQUEST's speed parameter — "" (default) or "fast"
+//	InferenceGeo = usage.inference_geo — the region the request was pinned to,
+//	               or "global"/"not_available" when unpinned
+//
+// Fast mode and pinned-region inference multiply the uncached-input and
+// output rates (fast is 2×–6× depending on the model, "us" is 1.1×); cache
+// reads and writes bill unscaled, matching Anthropic's fast/geo pricing and
+// LiteLLM's calculator. A mode the model has no multiplier for — fast on a
+// model without fast pricing, a pinned geo without a geo factor, or an
+// unrecognized Speed value — fails to price rather than billing standard
+// rates: those premiums reach 6×, and silently dropping one is exactly the
+// kind of underbilling this module exists to prevent.
 type ClaudeUsage struct {
 	InputTokens                int64
 	CacheReadInputTokens       int64
 	CacheCreationInputTokens   int64
 	CacheCreation1hInputTokens int64
 	OutputTokens               int64
+	Speed                      string
+	InferenceGeo               string
 }
 
 // OpenAIUsage holds the RAW token counts of one OpenAI API response, named
@@ -85,10 +103,21 @@ type ClaudeUsage struct {
 // CachedInputTokens > InputTokens is impossible in a real response and
 // panics. OpenAI does not bill cache writes, so there is no cache-creation
 // field.
+//
+// DataResidency is the data-residency region of the host that served the
+// request: "eu" for eu.api.openai.com, "us" for us.api.openai.com, "" for
+// the global api.openai.com. Regionalized requests bill EVERY token —
+// cache reads included — at the model's regional-processing uplift (1.1× on
+// the models OpenAI regionally prices). A model without an uplift for the
+// region bills at standard rates: unlike Anthropic's response-asserted
+// fast/geo modes, residency is a transport fact that holds for every model,
+// and OpenAI publishes the uplift only for the models it regionally prices —
+// LiteLLM's calculator prices absent uplifts the same way.
 type OpenAIUsage struct {
 	InputTokens       int64
 	CachedInputTokens int64
 	OutputTokens      int64
+	DataResidency     string
 }
 
 // TierRates are exact USD-per-token prices for the five billable components.
@@ -116,9 +145,28 @@ type Tier struct {
 
 // Rates are a model's exact USD-per-token prices, parsed from LiteLLM's
 // decimal literals (never through float64).
+//
+// Fast and Geo are Anthropic price multipliers from LiteLLM's
+// provider_specific_entry: Fast scales uncached input and output when the
+// request ran with speed "fast" (2×–6× depending on the model), Geo maps a
+// pinned inference region (lowercased, e.g. "us") to its multiplier (1.1×).
+// Cache reads and writes are never scaled by either. RegionalUplift maps an
+// OpenAI data-residency region ("eu", "us") to the model's
+// regional_processing_uplift_multiplier_<region>, a flat uplift on ALL token
+// costs — cache included — for requests served by a regionalized host. Nil
+// or missing entries mean the model does not price that mode.
 type Rates struct {
-	Base  TierRates
-	Tiers []Tier // ascending by AbovePromptTokens; empty when untiered
+	Base           TierRates
+	Tiers          []Tier // ascending by AbovePromptTokens; empty when untiered
+	Fast           *big.Rat
+	Geo            map[string]*big.Rat
+	RegionalUplift map[string]*big.Rat
+
+	// litellmProvider is the entry's upstream litellm_provider value —
+	// which service bills this key. [ModelSelector.Key] checks it so a
+	// selector can never resolve another provider's entry; absent upstream
+	// means unowned and no selector matches (fail closed).
+	litellmProvider string
 }
 
 // Usage is one response's raw token usage. It is implemented only by
@@ -132,16 +180,31 @@ type Usage interface {
 	// billable components. Counts impossible in a real response — negative,
 	// or a subset exceeding its total — are caller bugs and panic.
 	disjoint() components
+	// premium resolves the usage's price-multiplying modes (fast, pinned
+	// geo, data residency) against the model's rates. ok is false when the
+	// usage reports a mode the model has no multiplier for — such usage must
+	// fail, never bill at standard rates.
+	premium(r Rates) (p premium, ok bool)
+}
+
+// premium is a response's resolved price multipliers: tokens scales uncached
+// input and output, cache scales cache reads and writes. Nil means unscaled
+// (1×). Anthropic's fast/geo premiums leave cache nil; OpenAI's regional
+// uplift sets both to the same factor.
+type premium struct {
+	tokens, cache *big.Rat
 }
 
 // Cost prices one response in nls at the standard service tier. model is
 // the LiteLLM pricing key. Cost normalizes the provider's raw usage into
 // disjoint components, resolves the context-window tier from the total
-// prompt size, computes rate × tokens exactly per component, sums in USD,
-// and ceiling-rounds only the final total, so sub-nls token costs
-// accumulate instead of truncating to zero and any non-zero usage costs at
-// least 1 nls. ok is false if the model is unknown, unpriced, or lacks a
-// rate for a component the usage reports.
+// prompt size, computes rate × tokens exactly per component (scaled by any
+// fast/geo/residency multiplier the usage triggers), sums in USD, and
+// ceiling-rounds only the final total, so sub-nls token costs accumulate
+// instead of truncating to zero and any non-zero usage costs at least 1 nls.
+// ok is false if the model is unknown, unpriced, lacks a rate for a
+// component the usage reports, or lacks a multiplier for a mode the usage
+// reports.
 func Cost(model string, u Usage) (Nls, bool) {
 	return CostTier(model, TierStandard, u)
 }
@@ -159,7 +222,11 @@ func CostTier(model string, tier ServiceTier, u Usage) (Nls, bool) {
 	if !ok {
 		return 0, false
 	}
-	return cost(r, c)
+	p, ok := u.premium(r)
+	if !ok {
+		return 0, false
+	}
+	return cost(r, c, p)
 }
 
 func (u ClaudeUsage) disjoint() components {
@@ -178,6 +245,39 @@ func (u ClaudeUsage) disjoint() components {
 	}
 }
 
+// premium composes the fast-mode and pinned-geo multipliers, which scale
+// uncached input and output only — Anthropic bills cache reads and writes at
+// their normal rates in both modes, and LiteLLM's calculator excludes cache
+// costs from these multipliers the same way. "global" and "not_available"
+// are the API's unpinned geos and never carry a premium; any other geo, and
+// speed "fast", require a factor in the model's rates and fail without one.
+func (u ClaudeUsage) premium(r Rates) (premium, bool) {
+	m := big.NewRat(1, 1)
+	switch u.Speed {
+	case "", "standard":
+	case "fast":
+		if r.Fast == nil {
+			return premium{}, false
+		}
+		m.Mul(m, r.Fast)
+	default:
+		return premium{}, false // a speed this module cannot price must never bill standard rates
+	}
+	switch geo := strings.ToLower(u.InferenceGeo); geo {
+	case "", "global", "not_available":
+	default:
+		f, ok := r.Geo[geo]
+		if !ok {
+			return premium{}, false
+		}
+		m.Mul(m, f)
+	}
+	if m.Cmp(big.NewRat(1, 1)) == 0 {
+		return premium{}, true
+	}
+	return premium{tokens: m}, true
+}
+
 func (u OpenAIUsage) disjoint() components {
 	if u.InputTokens < 0 || u.CachedInputTokens < 0 || u.OutputTokens < 0 {
 		panic(fmt.Sprintf("llmcost: negative token counts: %+v", u))
@@ -190,6 +290,17 @@ func (u OpenAIUsage) disjoint() components {
 		cacheRead: u.CachedInputTokens,
 		output:    u.OutputTokens,
 	}
+}
+
+// premium applies the model's regional-processing uplift to every component
+// — OpenAI's uplift is a flat multiplier on all token costs, cache reads
+// included. A region the model has no uplift for bills at standard rates
+// (see the DataResidency field doc for why absent ≠ unpriced here).
+func (u OpenAIUsage) premium(r Rates) (premium, bool) {
+	if f, ok := r.RegionalUplift[strings.ToLower(u.DataResidency)]; ok {
+		return premium{tokens: f, cache: f}, true
+	}
+	return premium{}, true
 }
 
 // RatesFor returns the raw standard-tier per-token rates for model (a
@@ -209,7 +320,14 @@ func RatesForTier(model string, tier ServiceTier) (Rates, bool) {
 	if !ok {
 		return Rates{}, false
 	}
-	out := Rates{Base: r.Base.clone(), Tiers: make([]Tier, len(r.Tiers))}
+	out := Rates{
+		Base:            r.Base.clone(),
+		Tiers:           make([]Tier, len(r.Tiers)),
+		Fast:            cpRat(r.Fast),
+		Geo:             cloneRatMap(r.Geo),
+		RegionalUplift:  cloneRatMap(r.RegionalUplift),
+		litellmProvider: r.litellmProvider,
+	}
 	for i, t := range r.Tiers {
 		out.Tiers[i] = Tier{AbovePromptTokens: t.AbovePromptTokens, TierRates: t.clone()}
 	}
@@ -231,21 +349,24 @@ func (c components) promptTokens() int64 {
 }
 
 // cost is the pure core: resolve the tier from total prompt size, then
-// Σ rate × tokens exactly in USD and ceiling-round the total to nls. A
-// positive count on a component the tier has no rate for fails — a model that
-// cannot price reported usage must never bill it as zero.
-func cost(r Rates, c components) (Nls, bool) {
+// Σ rate × tokens × multiplier exactly in USD and ceiling-round the total to
+// nls. Multipliers scale the tier-resolved rates — tier selection itself is
+// by token counts alone. A positive count on a component the tier has no
+// rate for fails — a model that cannot price reported usage must never bill
+// it as zero.
+func cost(r Rates, c components, p premium) (Nls, bool) {
 	t := r.tier(c.promptTokens())
 	total := new(big.Rat)
 	for _, part := range []struct {
 		rate   *big.Rat
 		tokens int64
+		mult   *big.Rat // nil = unscaled
 	}{
-		{t.Input, c.input},
-		{t.CacheRead, c.cacheRead},
-		{t.CacheCreation, c.cacheCreation},
-		{t.CacheCreation1h, c.cacheCreation1h},
-		{t.Output, c.output},
+		{t.Input, c.input, p.tokens},
+		{t.CacheRead, c.cacheRead, p.cache},
+		{t.CacheCreation, c.cacheCreation, p.cache},
+		{t.CacheCreation1h, c.cacheCreation1h, p.cache},
+		{t.Output, c.output, p.tokens},
 	} {
 		if part.tokens == 0 {
 			continue
@@ -253,7 +374,11 @@ func cost(r Rates, c components) (Nls, bool) {
 		if part.rate == nil {
 			return 0, false
 		}
-		total.Add(total, new(big.Rat).Mul(part.rate, new(big.Rat).SetInt64(part.tokens)))
+		usd := new(big.Rat).Mul(part.rate, new(big.Rat).SetInt64(part.tokens))
+		if part.mult != nil {
+			usd.Mul(usd, part.mult)
+		}
+		total.Add(total, usd)
 	}
 	return ceilNls(total), true
 }
@@ -270,13 +395,25 @@ func (r Rates) tier(promptTokens int64) TierRates {
 }
 
 func (t TierRates) clone() TierRates {
-	cp := func(r *big.Rat) *big.Rat {
-		if r == nil {
-			return nil
-		}
-		return new(big.Rat).Set(r)
+	return TierRates{Input: cpRat(t.Input), CacheRead: cpRat(t.CacheRead), CacheCreation: cpRat(t.CacheCreation), CacheCreation1h: cpRat(t.CacheCreation1h), Output: cpRat(t.Output)}
+}
+
+func cpRat(r *big.Rat) *big.Rat {
+	if r == nil {
+		return nil
 	}
-	return TierRates{Input: cp(t.Input), CacheRead: cp(t.CacheRead), CacheCreation: cp(t.CacheCreation), CacheCreation1h: cp(t.CacheCreation1h), Output: cp(t.Output)}
+	return new(big.Rat).Set(r)
+}
+
+func cloneRatMap(m map[string]*big.Rat) map[string]*big.Rat {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]*big.Rat, len(m))
+	for k, v := range m {
+		out[k] = cpRat(v)
+	}
+	return out
 }
 
 // priceable reports whether a component set can bill: positive input and
@@ -399,7 +536,20 @@ func parseTier(fields map[string]json.RawMessage, svc string) (Rates, bool) {
 	if !r.Base.priceable() {
 		return Rates{}, false
 	}
+	if raw, ok := fields["litellm_provider"]; ok {
+		_ = json.Unmarshal(raw, &r.litellmProvider) // non-string stays "": unowned, no selector matches
+	}
+	r.Fast, r.Geo = parseProviderMultipliers(fields)
 	for key := range fields {
+		if region, ok := strings.CutPrefix(key, "regional_processing_uplift_multiplier_"); ok {
+			if f := ratField(fields, key); f != nil && f.Sign() > 0 {
+				if r.RegionalUplift == nil {
+					r.RegionalUplift = map[string]*big.Rat{}
+				}
+				r.RegionalUplift[strings.ToLower(region)] = f
+			}
+			continue
+		}
 		m := tierKey.FindStringSubmatch(key)
 		if m == nil || m[3] != svc {
 			continue
@@ -419,6 +569,38 @@ func parseTier(fields map[string]json.RawMessage, svc string) (Rates, bool) {
 	}
 	slices.SortFunc(r.Tiers, func(a, b Tier) int { return cmp.Compare(a.AbovePromptTokens, b.AbovePromptTokens) })
 	return r, true
+}
+
+// parseProviderMultipliers reads LiteLLM's provider_specific_entry object:
+// numeric fields are price multipliers — "fast" for fast mode, any other for
+// a regional-inference geo (e.g. "us": 1.1). Non-numeric fields (e.g.
+// bedrock_invocation_schema) are not multipliers and are skipped. A
+// non-positive factor is garbage and dropped, so the mode fails to price
+// rather than billing scaled-toward-zero.
+func parseProviderMultipliers(fields map[string]json.RawMessage) (fast *big.Rat, geo map[string]*big.Rat) {
+	raw, ok := fields["provider_specific_entry"]
+	if !ok {
+		return nil, nil
+	}
+	var entries map[string]json.RawMessage
+	if json.Unmarshal(raw, &entries) != nil {
+		return nil, nil
+	}
+	for key := range entries {
+		f := ratField(entries, key)
+		if f == nil || f.Sign() <= 0 {
+			continue
+		}
+		if key == "fast" {
+			fast = f
+			continue
+		}
+		if geo == nil {
+			geo = map[string]*big.Rat{}
+		}
+		geo[strings.ToLower(key)] = f
+	}
+	return fast, geo
 }
 
 // ratField converts one JSON number field to an exact rational; nil if

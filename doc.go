@@ -23,6 +23,8 @@
 //		CacheCreationInputTokens:   u.CacheCreationInputTokens, // TOTAL cache writes, both TTLs
 //		CacheCreation1hInputTokens: u.CacheCreation.Ephemeral1hInputTokens, // the 1h-TTL subset
 //		OutputTokens:               u.OutputTokens,
+//		Speed:                      speed,          // the REQUEST's speed param: "" or "fast"
+//		InferenceGeo:               u.InferenceGeo, // usage.inference_geo when present
 //	})
 //
 // OpenAI reports overlapping counts — input_tokens INCLUDES cached_tokens:
@@ -31,13 +33,15 @@
 //		InputTokens:       u.InputTokens,       // total input, cached included
 //		CachedInputTokens: u.CachedInputTokens, // the cached subset of InputTokens
 //		OutputTokens:      u.OutputTokens,      // reasoning tokens already included
+//		DataResidency:     residency,           // "eu"/"us" when the host was eu./us.api.openai.com
 //	})
 //
 // Cost returns (Nls, bool): ok=false whenever the response cannot be priced —
-// unknown model, unpriced model, or usage on a component the model has no
-// rate for. Nothing ever silently bills zero or falls back to another
-// component's rate. [RatesFor] exposes the raw per-token rates (base and
-// tiers) for callers that want them.
+// unknown model, unpriced model, usage on a component the model has no rate
+// for, or a mode (fast, pinned geo) the model has no multiplier for. Nothing
+// ever silently bills zero or falls back to another component's rate.
+// [RatesFor] exposes the raw per-token rates (base, tiers, and multipliers)
+// for callers that want them.
 //
 // # Service tiers
 //
@@ -85,6 +89,34 @@
 // A component upstream leaves untiered inherits its base rate — the base of
 // the service tier being priced, never another service tier's.
 //
+// # Price multipliers — fast mode, pinned geo, data residency
+//
+// Three request modes multiply the per-token rates; each is priced exactly
+// as LiteLLM's calculator prices it from the same data.
+//
+// Anthropic's fast mode (request speed:"fast") bills uncached input and
+// output at the model's fast multiplier — 6× on claude-opus-4-6/4-7, 2× on
+// claude-opus-4-8 — and Anthropic's pinned-region inference
+// (usage.inference_geo, e.g. "us") at the model's geo multiplier (1.1×).
+// The two compose multiplicatively; cache reads and writes bill UNSCALED in
+// both modes. A fast response on a model without fast pricing, a pinned geo
+// without a factor, or an unrecognized Speed value fails to price: these
+// premiums reach 6×, so billing standard rates on a pricing-data lag is
+// exactly the silent underbill this module exists to prevent. The unpinned
+// geos "global" and "not_available" carry no premium.
+//
+// OpenAI's data residency (OpenAIUsage.DataResidency — "eu"/"us" when the
+// request was served by eu./us.api.openai.com) bills EVERY component, cache
+// reads included, at the model's regional-processing uplift (1.1× on the
+// gpt-5.4/5.5 family). Unlike the response-asserted Anthropic modes,
+// residency is a caller-stated transport fact that holds for every model
+// while OpenAI publishes the uplift only for the models it regionally
+// prices — so a model without an uplift for the region bills at standard
+// rates rather than failing, matching LiteLLM.
+//
+// Multipliers scale the tier-resolved rates; tier selection itself is a
+// pure function of token counts.
+//
 // # Precision and rounding
 //
 // LiteLLM rates are tiny USD-per-token decimals, so a single token costs a
@@ -95,16 +127,38 @@
 // of truncating to zero, and any non-zero usage costs at least 1 nls — never
 // silently free.
 //
-// # Model names
+// # Model names and providers
 //
 // Model ids are LiteLLM pricing keys, looked up directly (e.g.
-// "claude-opus-4-8", "gpt-5.4", "codex-mini-latest"). This module owns no
-// alias layer: a consumer with internal model ids owns its own id → LiteLLM
-// key mapping and should test that every id it bills resolves here — that
-// test is the consumer's guarantee that a data sync can't silently drop a
-// model it depends on. A model prices only if LiteLLM lists positive input
-// and output rates for it — entries without pricing (or with zero rates)
-// return ok=false.
+// "claude-opus-4-8", "gpt-5.4", "codex-mini-latest"). Provider differences
+// live in the KEY, not in code: the same vendor model bills differently per
+// serving provider — "gpt-5.4" (OpenAI direct), "azure/gpt-5.4",
+// "azure/us/gpt-5.4" (Azure US data zone, ~10% premium baked into the
+// rates), "vertex_ai/claude-sonnet-4-5", or the AWS model id verbatim on
+// Bedrock — and each is its own table entry.
+//
+// [ModelSelector] owns the key GRAMMAR for Anthropic and OpenAI models
+// across direct, Bedrock, Vertex, Azure OpenAI, and Azure AI Foundry.
+// Key() resolves the provider's NATIVE id verbatim, or the VENDOR's
+// canonical model name through the cloud's bespoke renaming scheme —
+// Bedrock's vendor prefixes, artifact versions (-v1:0), geo profiles and
+// aws-region key forms; Vertex's @date and @default; Azure's gpt-35
+// spelling — so {Bedrock, "claude-sonnet-4-5-20250929"} selects
+// "anthropic.claude-sonnet-4-5-20250929-v1:0" and
+// {Bedrock, "claude-sonnet-4-5", "us"} the us. inference profile.
+// Resolution is deterministic and verified: never guessing (an undated name
+// ambiguous across several dated variants fails), never falling back (a
+// missing Azure region key fails rather than billing the cheaper global
+// key), and never crossing providers (the resolved entry's own
+// litellm_provider must match). TestSelectorCanonicalCoverage gates every
+// data sync on the whole scheme: each cloud-served Anthropic/OpenAI key
+// must remain selectable by its vendor name. This module still owns no
+// fuzzy alias layer: WHICH selectors a consumer bills is the consumer's
+// policy, and the consumer should test that each of its selectors resolves
+// — that test is the guarantee that a data sync can't silently drop a model
+// it depends on. A model prices only if LiteLLM lists positive input and
+// output rates for it — entries without pricing (or with zero rates) return
+// ok=false.
 //
 // # Vendored data
 //

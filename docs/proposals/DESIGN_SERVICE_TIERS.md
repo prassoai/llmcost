@@ -92,6 +92,13 @@ func RatesFor(model string) (Rates, bool)     // ≡ RatesForTier(model, TierSta
   even for unknown models/tiers, as today), then `table()[model][tier]` —
   an unknown model, missing tier, or unrecognized tier string is one
   uniform `ok=false`. (R3, R5)
+- **Composition with price multipliers.** Fast/geo/residency premiums
+  (added on main in parallel with this design) resolve against the
+  service tier's own `Rates` and scale its tier-resolved rates — the same
+  premium × context-tier composition as standard, applied per service
+  tier. Each tier's parse carries the model's multipliers and provider
+  attribution, and `ModelSelector` reads them from the standard tier,
+  which anchors membership (R6).
 - **Validation gate.** `TestTableInvariants` iterates every model × parsed
   tier (priceable rates, strictly-ascending positive thresholds, standard
   always present); `TestVendoredDataCanaries` pins gpt-5.5 (flex and
