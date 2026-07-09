@@ -16,7 +16,7 @@ components inside. Never pre-subtract, never mix shapes.
 **Anthropic** (disjoint counts — `input_tokens` EXCLUDES cache activity):
 
 ```go
-cost, ok := llmcost.Cost("claude-opus-4-8", llmcost.ClaudeUsage{
+cost, ok := llmcost.Cost("claude-opus-4-8", llmcost.TierStandard, llmcost.ClaudeUsage{
     InputTokens:                1200,  // usage.input_tokens — uncached input only
     CacheReadInputTokens:       45000, // usage.cache_read_input_tokens
     CacheCreationInputTokens:   3000,  // usage.cache_creation_input_tokens — TOTAL writes, both TTLs
@@ -30,7 +30,7 @@ cost, ok := llmcost.Cost("claude-opus-4-8", llmcost.ClaudeUsage{
 **OpenAI / codex** (overlapping counts — `input_tokens` INCLUDES cached):
 
 ```go
-cost, ok := llmcost.Cost("gpt-5.4", llmcost.OpenAIUsage{
+cost, ok := llmcost.Cost("gpt-5.4", llmcost.TierStandard, llmcost.OpenAIUsage{
     InputTokens:       46200, // usage.input_tokens — total, cached included
     CachedInputTokens: 45000, // input_tokens_details.cached_tokens — subset
     OutputTokens:      800,   // reasoning tokens are a subset, already included
@@ -45,11 +45,11 @@ on a component the model has no rate for. Nothing silently bills zero.
 
 OpenAI bills the same request differently by processing tier: **flex**
 (cheaper, slower) and **priority** (pricier, faster) publish their own rates
-(LiteLLM's `*_flex` / `*_priority` variants). `CostTier` selects one;
-`Cost` is exactly the standard-tier view.
+(LiteLLM's `*_flex` / `*_priority` variants). `Cost` takes the tier
+explicitly — `TierStandard` for ordinary requests.
 
 ```go
-cost, ok := llmcost.CostTier("gpt-5.5", llmcost.TierFlex, llmcost.OpenAIUsage{
+cost, ok := llmcost.Cost("gpt-5.5", llmcost.TierFlex, llmcost.OpenAIUsage{
     InputTokens:       46200,
     CachedInputTokens: 45000,
     OutputTokens:      800,
@@ -116,7 +116,7 @@ modeled.
   test that each resolves — that test is your guarantee that a data sync
   can't silently drop a model you depend on.
 
-`RatesFor(model)` / `RatesForTier(model, tier)` expose the raw per-token
+`RatesFor(model, tier)` exposes the raw per-token
 rates — base and tiers — for callers that want them. See `doc.go` for the
 full contract.
 

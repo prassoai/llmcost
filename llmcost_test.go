@@ -171,7 +171,7 @@ func TestCacheWriteTTLSplit(t *testing.T) {
 	if !ok || got != 863 {
 		t.Fatalf("cost = %d, %v; want 863, true", got, ok)
 	}
-	viaAPI, ok2 := Cost("claude-sonnet-4-5", ClaudeUsage{CacheCreationInputTokens: 2000, CacheCreation1hInputTokens: 500})
+	viaAPI, ok2 := Cost("claude-sonnet-4-5", TierStandard, ClaudeUsage{CacheCreationInputTokens: 2000, CacheCreation1hInputTokens: 500})
 	direct, ok3 := cost(table()["claude-sonnet-4-5"][TierStandard], components{cacheCreation: 1500, cacheCreation1h: 500}, premium{})
 	if !ok2 || !ok3 || viaAPI != direct {
 		t.Fatalf("Cost(ClaudeUsage) = %d, %v; internal = %d, %v; want equal and ok", viaAPI, ok2, direct, ok3)
@@ -245,7 +245,7 @@ func TestOpenAINormalization(t *testing.T) {
 		t.Fatalf("cost = %d, %v; want 310, true", got, ok)
 	}
 	// The exported entry point must produce the same normalization from raw counts.
-	viaAPI, ok2 := Cost("gpt-5.4", OpenAIUsage{InputTokens: 1000, CachedInputTokens: 400, OutputTokens: 100})
+	viaAPI, ok2 := Cost("gpt-5.4", TierStandard, OpenAIUsage{InputTokens: 1000, CachedInputTokens: 400, OutputTokens: 100})
 	direct, ok3 := cost(table()["gpt-5.4"][TierStandard], components{input: 600, cacheRead: 400, output: 100}, premium{})
 	if !ok2 || !ok3 || viaAPI != direct {
 		t.Fatalf("Cost(OpenAIUsage) = %d, %v; internal = %d, %v; want equal and ok", viaAPI, ok2, direct, ok3)
@@ -304,12 +304,6 @@ func TestServiceTierCost(t *testing.T) {
 		if got, ok := cost(r, c, premium{}); !ok || got != want {
 			t.Errorf("%s: cost = %d, %v; want %d, true", tier, got, ok, want)
 		}
-	}
-	// The exported entry points agree, and Cost is the standard-tier view.
-	std, ok1 := Cost("gpt-5.5", OpenAIUsage{InputTokens: 1000, CachedInputTokens: 400, OutputTokens: 100})
-	viaTier, ok2 := CostTier("gpt-5.5", TierStandard, OpenAIUsage{InputTokens: 1000, CachedInputTokens: 400, OutputTokens: 100})
-	if !ok1 || !ok2 || std != viaTier {
-		t.Errorf("Cost = %d, %v; CostTier(standard) = %d, %v; want equal and ok", std, ok1, viaTier, ok2)
 	}
 }
 
@@ -378,11 +372,11 @@ func TestServiceTierNoCrossFallback(t *testing.T) {
 // silently pricing at standard rates.
 func TestUnknownServiceTier(t *testing.T) {
 	for _, tier := range []ServiceTier{"", "turbo", "fast", "Standard", "STANDARD"} {
-		if _, ok := CostTier("gpt-5.4", tier, OpenAIUsage{InputTokens: 1}); ok {
-			t.Errorf("CostTier(%q) resolved; want ok=false", tier)
+		if _, ok := Cost("gpt-5.4", tier, OpenAIUsage{InputTokens: 1}); ok {
+			t.Errorf("Cost(%q) resolved; want ok=false", tier)
 		}
-		if _, ok := RatesForTier("gpt-5.4", tier); ok {
-			t.Errorf("RatesForTier(%q) resolved; want ok=false", tier)
+		if _, ok := RatesFor("gpt-5.4", tier); ok {
+			t.Errorf("RatesFor(%q) resolved; want ok=false", tier)
 		}
 	}
 }
@@ -406,7 +400,7 @@ func TestClaudeFastMode(t *testing.T) {
 		t.Fatalf("fast = %d, %v; want 7250, true", got, ok)
 	}
 	// The exported entry point resolves the same premium from the same raw usage.
-	viaAPI, ok := Cost("claude-opus-4-6", u)
+	viaAPI, ok := Cost("claude-opus-4-6", TierStandard, u)
 	direct, ok2 := price(table()["claude-opus-4-6"][TierStandard], u)
 	if !ok || !ok2 || viaAPI != direct {
 		t.Fatalf("Cost(fast) = %d, %v; internal = %d, %v; want equal and ok", viaAPI, ok, direct, ok2)
@@ -488,7 +482,7 @@ func TestOpenAIRegionalUplift(t *testing.T) {
 	}
 	// The exported entry point resolves the same premium from the same raw usage.
 	u := OpenAIUsage{InputTokens: 1000, CachedInputTokens: 400, OutputTokens: 100, DataResidency: "eu"}
-	viaAPI, ok := Cost("gpt-5.4", u)
+	viaAPI, ok := Cost("gpt-5.4", TierStandard, u)
 	direct, ok2 := price(table()["gpt-5.4"][TierStandard], u)
 	if !ok || !ok2 || viaAPI != direct {
 		t.Fatalf("Cost(eu) = %d, %v; internal = %d, %v; want equal and ok", viaAPI, ok, direct, ok2)
@@ -528,10 +522,10 @@ func TestCeilingRounding(t *testing.T) {
 
 // TestZeroUsageIsFree encodes the same at the exported surface.
 func TestZeroUsageIsFree(t *testing.T) {
-	if got, ok := Cost("claude-opus-4-8", ClaudeUsage{}); !ok || got != 0 {
+	if got, ok := Cost("claude-opus-4-8", TierStandard, ClaudeUsage{}); !ok || got != 0 {
 		t.Fatalf("Cost(zero) = %d, %v; want 0, true", got, ok)
 	}
-	if got, ok := Cost("gpt-5", OpenAIUsage{}); !ok || got != 0 {
+	if got, ok := Cost("gpt-5", TierStandard, OpenAIUsage{}); !ok || got != 0 {
 		t.Fatalf("Cost(zero) = %d, %v; want 0, true", got, ok)
 	}
 }
@@ -542,13 +536,13 @@ func TestZeroUsageIsFree(t *testing.T) {
 // not resolve either.
 func TestUnknownModel(t *testing.T) {
 	for _, model := range []string{"no-such-model", "sample_spec", ""} {
-		if _, ok := Cost(model, ClaudeUsage{InputTokens: 1}); ok {
+		if _, ok := Cost(model, TierStandard, ClaudeUsage{InputTokens: 1}); ok {
 			t.Errorf("Cost(%q) resolved; want ok=false", model)
 		}
-		if _, ok := Cost(model, OpenAIUsage{InputTokens: 1}); ok {
+		if _, ok := Cost(model, TierStandard, OpenAIUsage{InputTokens: 1}); ok {
 			t.Errorf("Cost(%q) resolved; want ok=false", model)
 		}
-		if _, ok := RatesFor(model); ok {
+		if _, ok := RatesFor(model, TierStandard); ok {
 			t.Errorf("RatesFor(%q) resolved; want ok=false", model)
 		}
 	}
@@ -603,12 +597,12 @@ func TestTableInvariants(t *testing.T) {
 // build, not silently bills zero.
 func TestVendoredDataCanaries(t *testing.T) {
 	for _, model := range []string{"claude-opus-4-8", "claude-haiku-4-5", "gpt-5.4", "gpt-4o", "codex-mini-latest"} {
-		if _, ok := RatesFor(model); !ok {
+		if _, ok := RatesFor(model, TierStandard); !ok {
 			t.Errorf("canary %s no longer resolves", model)
 		}
 	}
 	for model, want := range map[string]int64{"claude-sonnet-4-5": 200000, "gpt-5.4": 272000} {
-		r, ok := RatesFor(model)
+		r, ok := RatesFor(model, TierStandard)
 		if !ok {
 			t.Errorf("%s no longer resolves", model)
 			continue
@@ -627,7 +621,7 @@ func TestVendoredDataCanaries(t *testing.T) {
 		"gpt-5.3-codex": {TierFlex: false, TierPriority: true},
 	} {
 		for tier, want := range tiers {
-			if _, ok := RatesForTier(model, tier); ok != want {
+			if _, ok := RatesFor(model, tier); ok != want {
 				t.Errorf("%s at %s: resolves=%v, want %v", model, tier, ok, want)
 			}
 		}
@@ -636,20 +630,20 @@ func TestVendoredDataCanaries(t *testing.T) {
 	// uplifts must parse. If these vanish after a sync, fast-mode and pinned-
 	// geo usage starts failing (never underbilling) and residency usage
 	// starts billing standard — verify against upstream before merging.
-	if r, ok := RatesFor("claude-opus-4-8"); !ok || r.Fast == nil || r.Fast.Cmp(big.NewRat(2, 1)) != 0 || r.Geo["us"] == nil {
+	if r, ok := RatesFor("claude-opus-4-8", TierStandard); !ok || r.Fast == nil || r.Fast.Cmp(big.NewRat(2, 1)) != 0 || r.Geo["us"] == nil {
 		t.Errorf("claude-opus-4-8 multipliers = fast %v, geo %v; want fast 2 and a us factor", r.Fast, r.Geo)
 	}
-	if r, ok := RatesFor("gpt-5.4"); !ok || r.RegionalUplift["eu"] == nil || r.RegionalUplift["us"] == nil {
+	if r, ok := RatesFor("gpt-5.4", TierStandard); !ok || r.RegionalUplift["eu"] == nil || r.RegionalUplift["us"] == nil {
 		t.Errorf("gpt-5.4 regional uplifts = %v; want eu and us factors", r.RegionalUplift)
 	}
 }
 
 // TestCostMatchesRatesFor encodes that the exported views never disagree:
-// CostTier prices exactly what RatesForTier-derived math predicts — for
+// Cost prices exactly what RatesFor-derived math predicts — for
 // EVERY model and service tier in the table, through both usage shapes,
 // including across context-tier boundaries and on models that fail
-// (unpriced components must fail identically). Cost, being
-// CostTier(TierStandard), is covered by the standard iteration.
+// (unpriced components must fail identically). Ordinary pricing is
+// covered by the standard iteration.
 func TestCostMatchesRatesFor(t *testing.T) {
 	for model, tiers := range table() {
 		for tier, r := range tiers {
@@ -658,7 +652,7 @@ func TestCostMatchesRatesFor(t *testing.T) {
 				{input: 300000, cacheRead: 41775, output: 977}, // above any 200k/272k tier
 			} {
 				want, wantOK := cost(r, c, premium{})
-				got, gotOK := CostTier(model, tier, ClaudeUsage{
+				got, gotOK := Cost(model, tier, ClaudeUsage{
 					InputTokens:                c.input,
 					CacheReadInputTokens:       c.cacheRead,
 					CacheCreationInputTokens:   c.cacheCreation + c.cacheCreation1h, // raw API total
@@ -666,12 +660,12 @@ func TestCostMatchesRatesFor(t *testing.T) {
 					OutputTokens:               c.output,
 				})
 				if got != want || gotOK != wantOK {
-					t.Errorf("%s/%s %+v: CostTier = %d, %v; RatesForTier math = %d, %v", model, tier, c, got, gotOK, want, wantOK)
+					t.Errorf("%s/%s %+v: Cost = %d, %v; RatesFor math = %d, %v", model, tier, c, got, gotOK, want, wantOK)
 				}
 				if c.cacheCreation == 0 && c.cacheCreation1h == 0 {
-					gotOA, okOA := CostTier(model, tier, OpenAIUsage{InputTokens: c.input + c.cacheRead, CachedInputTokens: c.cacheRead, OutputTokens: c.output})
+					gotOA, okOA := Cost(model, tier, OpenAIUsage{InputTokens: c.input + c.cacheRead, CachedInputTokens: c.cacheRead, OutputTokens: c.output})
 					if gotOA != want || okOA != wantOK {
-						t.Errorf("%s/%s %+v: CostTier(OpenAIUsage) = %d, %v; RatesForTier math = %d, %v", model, tier, c, gotOA, okOA, want, wantOK)
+						t.Errorf("%s/%s %+v: Cost(OpenAIUsage) = %d, %v; RatesFor math = %d, %v", model, tier, c, gotOA, okOA, want, wantOK)
 					}
 				}
 			}
@@ -691,8 +685,8 @@ func TestRatesForReturnsCopies(t *testing.T) {
 		{"claude-opus-4-8", ClaudeUsage{InputTokens: 1000, Speed: "fast", InferenceGeo: "us"}},   // fast and geo rats exercised
 		{"gpt-5.4", OpenAIUsage{InputTokens: 1000, CachedInputTokens: 400, DataResidency: "eu"}}, // uplift rat exercised
 	} {
-		before, _ := Cost(tc.model, tc.u)
-		r, _ := RatesFor(tc.model)
+		before, _ := Cost(tc.model, TierStandard, tc.u)
+		r, _ := RatesFor(tc.model, TierStandard)
 		all := []TierRates{r.Base}
 		for _, tier := range r.Tiers {
 			all = append(all, tier.TierRates)
@@ -712,7 +706,7 @@ func TestRatesForReturnsCopies(t *testing.T) {
 				rat.SetInt64(999)
 			}
 		}
-		if after, _ := Cost(tc.model, tc.u); after != before {
+		if after, _ := Cost(tc.model, TierStandard, tc.u); after != before {
 			t.Fatalf("%s: mutating RatesFor result changed Cost: %d -> %d", tc.model, before, after)
 		}
 	}
@@ -732,23 +726,23 @@ func TestInvalidUsagePanics(t *testing.T) {
 		}()
 		f()
 	}
-	mustPanic("claude negative input", func() { Cost("claude-opus-4-8", ClaudeUsage{InputTokens: -1}) })
-	mustPanic("claude negative cache read", func() { Cost("claude-opus-4-8", ClaudeUsage{CacheReadInputTokens: -1}) })
-	mustPanic("claude negative cache write", func() { Cost("claude-opus-4-8", ClaudeUsage{CacheCreationInputTokens: -1}) })
+	mustPanic("claude negative input", func() { Cost("claude-opus-4-8", TierStandard, ClaudeUsage{InputTokens: -1}) })
+	mustPanic("claude negative cache read", func() { Cost("claude-opus-4-8", TierStandard, ClaudeUsage{CacheReadInputTokens: -1}) })
+	mustPanic("claude negative cache write", func() { Cost("claude-opus-4-8", TierStandard, ClaudeUsage{CacheCreationInputTokens: -1}) })
 	mustPanic("claude negative 1h cache write", func() {
-		Cost("claude-opus-4-8", ClaudeUsage{CacheCreationInputTokens: 1, CacheCreation1hInputTokens: -1})
+		Cost("claude-opus-4-8", TierStandard, ClaudeUsage{CacheCreationInputTokens: 1, CacheCreation1hInputTokens: -1})
 	})
 	mustPanic("claude 1h writes exceed total writes", func() {
-		Cost("claude-opus-4-8", ClaudeUsage{CacheCreationInputTokens: 10, CacheCreation1hInputTokens: 11})
+		Cost("claude-opus-4-8", TierStandard, ClaudeUsage{CacheCreationInputTokens: 10, CacheCreation1hInputTokens: 11})
 	})
-	mustPanic("claude negative output", func() { Cost("claude-opus-4-8", ClaudeUsage{OutputTokens: -1}) })
-	mustPanic("openai negative input", func() { Cost("gpt-5", OpenAIUsage{InputTokens: -1}) })
-	mustPanic("openai negative cached", func() { Cost("gpt-5", OpenAIUsage{CachedInputTokens: -1}) })
-	mustPanic("openai negative output", func() { Cost("gpt-5", OpenAIUsage{OutputTokens: -1}) })
-	mustPanic("openai cached exceeds input", func() { Cost("gpt-5", OpenAIUsage{InputTokens: 10, CachedInputTokens: 11}) })
+	mustPanic("claude negative output", func() { Cost("claude-opus-4-8", TierStandard, ClaudeUsage{OutputTokens: -1}) })
+	mustPanic("openai negative input", func() { Cost("gpt-5", TierStandard, OpenAIUsage{InputTokens: -1}) })
+	mustPanic("openai negative cached", func() { Cost("gpt-5", TierStandard, OpenAIUsage{CachedInputTokens: -1}) })
+	mustPanic("openai negative output", func() { Cost("gpt-5", TierStandard, OpenAIUsage{OutputTokens: -1}) })
+	mustPanic("openai cached exceeds input", func() { Cost("gpt-5", TierStandard, OpenAIUsage{InputTokens: 10, CachedInputTokens: 11}) })
 	// Usage validation must not be masked by the model lookup: impossible
 	// counts panic even when the model is unknown.
-	mustPanic("unknown model, negative input", func() { Cost("no-such-model", ClaudeUsage{InputTokens: -1}) })
+	mustPanic("unknown model, negative input", func() { Cost("no-such-model", TierStandard, ClaudeUsage{InputTokens: -1}) })
 }
 
 // TestRatParsesDecimalLiteralsExactly encodes the no-float64 requirement:

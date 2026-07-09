@@ -17,7 +17,7 @@
 //
 // Anthropic reports disjoint counts — input_tokens EXCLUDES cache activity:
 //
-//	llmcost.Cost("claude-opus-4-8", llmcost.ClaudeUsage{
+//	llmcost.Cost("claude-opus-4-8", llmcost.TierStandard, llmcost.ClaudeUsage{
 //		InputTokens:                u.InputTokens,          // uncached input only
 //		CacheReadInputTokens:       u.CacheReadInputTokens, // billed at the cache-read rate
 //		CacheCreationInputTokens:   u.CacheCreationInputTokens, // TOTAL cache writes, both TTLs
@@ -29,7 +29,7 @@
 //
 // OpenAI reports overlapping counts — input_tokens INCLUDES cached_tokens:
 //
-//	llmcost.Cost("gpt-5.4", llmcost.OpenAIUsage{
+//	llmcost.Cost("gpt-5.4", llmcost.TierStandard, llmcost.OpenAIUsage{
 //		InputTokens:       u.InputTokens,       // total input, cached included
 //		CachedInputTokens: u.CachedInputTokens, // the cached subset of InputTokens
 //		OutputTokens:      u.OutputTokens,      // reasoning tokens already included
@@ -48,10 +48,11 @@
 // OpenAI bills the same request differently by processing tier: flex
 // (cheaper, slower) and priority (pricier, faster) publish their own
 // per-token rates, carried in LiteLLM's data as *_flex and *_priority field
-// variants. [CostTier] and [RatesForTier] select a [ServiceTier]; [Cost] and
-// [RatesFor] are exactly the [TierStandard] views.
+// variants. [Cost] and [RatesFor] take the [ServiceTier] explicitly —
+// [TierStandard] for ordinary requests; there are no default-tier
+// convenience wrappers.
 //
-//	llmcost.CostTier("gpt-5.5", llmcost.TierFlex, llmcost.OpenAIUsage{...})
+//	llmcost.Cost("gpt-5.5", llmcost.TierFlex, llmcost.OpenAIUsage{...})
 //
 // The no-fallback rule extends across tiers: a model without priceable rates
 // at the requested tier (e.g. gpt-5.3-codex has no flex rates), a tier

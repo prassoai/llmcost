@@ -36,7 +36,7 @@ func TestSelectorKeyGrammar(t *testing.T) {
 			t.Errorf("%+v: Key = %q, %v; want %q, true", tc.sel, got, ok, tc.want)
 			continue
 		}
-		if _, ok := RatesFor(got); !ok {
+		if _, ok := RatesFor(got, TierStandard); !ok {
 			t.Errorf("%+v: key %q does not resolve via RatesFor", tc.sel, got)
 		}
 	}

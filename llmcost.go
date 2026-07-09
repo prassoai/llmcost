@@ -195,28 +195,20 @@ type premium struct {
 	tokens, cache *big.Rat
 }
 
-// Cost prices one response in nls at the standard service tier. model is
-// the LiteLLM pricing key. Cost normalizes the provider's raw usage into
-// disjoint components, resolves the context-window tier from the total
-// prompt size, computes rate × tokens exactly per component (scaled by any
-// fast/geo/residency multiplier the usage triggers), sums in USD, and
-// ceiling-rounds only the final total, so sub-nls token costs accumulate
-// instead of truncating to zero and any non-zero usage costs at least 1 nls.
-// ok is false if the model is unknown, unpriced, lacks a rate for a
-// component the usage reports, or lacks a multiplier for a mode the usage
-// reports.
-func Cost(model string, u Usage) (Nls, bool) {
-	return CostTier(model, TierStandard, u)
-}
-
-// CostTier prices one response in nls at a service tier, with the same
-// semantics as [Cost] applied to the tier's own rates: the context-window
-// tier is resolved within the service tier, and ok is false if the model is
-// unknown, the model has no priceable rates at that tier (e.g. a model
-// LiteLLM lists no *_flex fields for), the tier is not one of the
-// [ServiceTier] constants, or the tier lacks a rate for a component the
-// usage reports. There is deliberately no fallback to another tier's rates.
-func CostTier(model string, tier ServiceTier, u Usage) (Nls, bool) {
+// Cost prices one response in nls. model is the LiteLLM pricing key; tier
+// is one of the [ServiceTier] constants — [TierStandard] for ordinary
+// requests. Cost normalizes the provider's raw usage into disjoint
+// components, resolves the context-window tier from the total prompt size
+// within the service tier, computes rate × tokens exactly per component
+// (scaled by any fast/geo/residency multiplier the usage triggers), sums in
+// USD, and ceiling-rounds only the final total, so sub-nls token costs
+// accumulate instead of truncating to zero and any non-zero usage costs at
+// least 1 nls. ok is false if the model is unknown, has no priceable rates
+// at the tier (e.g. a model LiteLLM lists no *_flex fields for), the tier
+// is not a [ServiceTier] constant, or the tier lacks a rate for a component
+// — or a multiplier for a mode — the usage reports. There is deliberately
+// no fallback to another tier's rates.
+func Cost(model string, tier ServiceTier, u Usage) (Nls, bool) {
 	c := u.disjoint() // before the lookup: impossible counts panic even for unknown models and tiers
 	r, ok := table()[model][tier]
 	if !ok {
@@ -303,19 +295,12 @@ func (u OpenAIUsage) premium(r Rates) (premium, bool) {
 	return premium{}, true
 }
 
-// RatesFor returns the raw standard-tier per-token rates for model (a
-// LiteLLM pricing key), for callers that want them. ok is false if the
-// model is unknown or has no positive rates. The returned rats are copies;
+// RatesFor returns the raw per-token rates for model (a LiteLLM pricing
+// key) at a service tier, for callers that want them. ok is false if the
+// model is unknown, has no priceable rates at that tier, or the tier is not
+// one of the [ServiceTier] constants. The returned rats are copies;
 // mutating them cannot corrupt the shared table.
-func RatesFor(model string) (Rates, bool) {
-	return RatesForTier(model, TierStandard)
-}
-
-// RatesForTier returns the raw per-token rates for model at a service tier.
-// ok is false if the model is unknown, has no priceable rates at that tier,
-// or the tier is not one of the [ServiceTier] constants. The returned rats
-// are copies; mutating them cannot corrupt the shared table.
-func RatesForTier(model string, tier ServiceTier) (Rates, bool) {
+func RatesFor(model string, tier ServiceTier) (Rates, bool) {
 	r, ok := table()[model][tier]
 	if !ok {
 		return Rates{}, false

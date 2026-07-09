@@ -18,9 +18,10 @@ documented "when llmcost grows tier support" TODO pointing here
 - **R1** A caller can price a response at OpenAI's `flex` or `priority`
   service tier with the same exactness guarantees as standard pricing
   (big.Rat arithmetic, ceiling-round only the final total).
-- **R2** The change is additive and backward-compatible: `Cost` and
-  `RatesFor` keep their signatures and semantics, and are exactly the
-  standard-tier views of the new API.
+- **R2** One way to price: `Cost` and `RatesFor` take the tier as an
+  explicit parameter — no standard-tier convenience wrappers. llmcost has
+  no backwards-compatibility contract; consumers update their call sites
+  (passing `TierStandard`) when they bump the module version.
 - **R3** No cross-tier fallback: pricing at a tier the model has no rates
   for — or usage reporting a component the tier has no rate for — returns
   `ok=false`. Flex/priority usage is never billed at standard rates (a
@@ -46,8 +47,8 @@ documented "when llmcost grows tier support" TODO pointing here
 
 ## Proposed design
 
-One new exported type and two new functions; everything else is the
-existing machinery parameterized by a key suffix.
+One new exported type and one new parameter on the two existing functions;
+everything else is the existing machinery parameterized by a key suffix.
 
 ```go
 // ServiceTier selects which of a model's per-request rate variants price
@@ -60,11 +61,8 @@ const (
     TierPriority ServiceTier = "priority" // LiteLLM's *_priority fields
 )
 
-func CostTier(model string, tier ServiceTier, u Usage) (Nls, bool)     // (satisfies R1, R3, R5)
-func RatesForTier(model string, tier ServiceTier) (Rates, bool)
-
-func Cost(model string, u Usage) (Nls, bool)  // ≡ CostTier(model, TierStandard, u)   (satisfies R2)
-func RatesFor(model string) (Rates, bool)     // ≡ RatesForTier(model, TierStandard)  (satisfies R2)
+func Cost(model string, tier ServiceTier, u Usage) (Nls, bool) // (satisfies R1, R2, R3, R5)
+func RatesFor(model string, tier ServiceTier) (Rates, bool)    // (satisfies R2)
 ```
 
 - **Table shape.** `table()` becomes `map[string]map[ServiceTier]Rates`.
@@ -88,10 +86,10 @@ func RatesFor(model string) (Rates, bool)     // ≡ RatesForTier(model, TierSta
   absent-component philosophy already in doc.go ("nothing ever silently
   bills zero or falls back to another component's rate") extends to tiers;
   inheriting standard's cache-read into flex would overbill 2×. (R3, R4)
-- **Lookup.** `CostTier` validates usage first (impossible counts panic
-  even for unknown models/tiers, as today), then `table()[model][tier]` —
-  an unknown model, missing tier, or unrecognized tier string is one
-  uniform `ok=false`. (R3, R5)
+- **Lookup.** `Cost` validates usage first (impossible counts panic even
+  for unknown models/tiers, as today), then `table()[model][tier]` — an
+  unknown model, missing tier, or unrecognized tier string is one uniform
+  `ok=false`. (R3, R5)
 - **Composition with price multipliers.** Fast/geo/residency premiums
   (added on main in parallel with this design) resolve against the
   service tier's own `Rates` and scale its tier-resolved rates — the same
@@ -111,7 +109,7 @@ func RatesFor(model string) (Rates, bool)     // ≡ RatesForTier(model, TierSta
 The Go API is the caller surface. Pricing a flex-tier response:
 
 ```go
-nls, ok := llmcost.CostTier("gpt-5.5", llmcost.TierFlex, llmcost.OpenAIUsage{
+nls, ok := llmcost.Cost("gpt-5.5", llmcost.TierFlex, llmcost.OpenAIUsage{
     InputTokens:       u.InputTokens,       // total input, cached included
     CachedInputTokens: u.CachedInputTokens,
     OutputTokens:      u.OutputTokens,
@@ -120,8 +118,9 @@ nls, ok := llmcost.CostTier("gpt-5.5", llmcost.TierFlex, llmcost.OpenAIUsage{
 
 `ok=false` when the model has no flex rates (e.g. gpt-5.3-codex) — the
 caller decides whether that is "record zero and log" (murmuration's
-choice) or an error. Existing callers are untouched: `Cost`/`RatesFor`
-compile and behave identically.
+choice) or an error. Existing call sites gain a `TierStandard` argument
+when their module bumps (R2); until then they stay pinned to the old
+version and are unaffected.
 
 Consumers own the mapping from their tier vocabulary to these constants
 (same rule as model ids): murmuration's follow-up maps its codex
@@ -130,9 +129,11 @@ drops its non-standard-tier zero-cost gate.
 
 ## Open questions
 
-- **Tag.** This is an additive API change: it deserves a minor tag
-  (v0.2.0) rather than the auto-patch the merge workflow applies. The
-  maintainer pushes minor tags manually (tag.yml preserves them).
+- **Tag.** This changes the `Cost`/`RatesFor` signatures (v0 module,
+  breaking allowed): it deserves a minor tag (v0.2.0) rather than the
+  auto-patch the merge workflow applies, signaling the call-site update to
+  consumers. The maintainer pushes minor tags manually (tag.yml preserves
+  them).
 - **Batch pricing (R8).** If a consumer ever needs Batch API pricing, the
   same mechanism extends (`TierBatch`/`_batches`), but batch jobs have
   different usage semantics (no interactive turn) — out of scope until a
