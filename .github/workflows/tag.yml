@@ -1,0 +1,30 @@
+# Auto-tag every merge to main with the next patch version. Go modules need a
+# real tag for consumers to pin; treating every merge as a patch release keeps
+# that automatic. Minor/major bumps are manual: push a vX.Y.0 tag by hand and
+# this workflow continues patching from there.
+name: tag
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0 # need tags to compute the next version
+      - name: tag next patch version
+        run: |
+          latest=$(git tag --list 'v*' --sort=-v:refname | head -1)
+          if [ -z "$latest" ]; then
+            next=v0.1.0
+          else
+            next=$(echo "$latest" | awk -F. '{printf "%s.%s.%d", $1, $2, $3 + 1}')
+          fi
+          git tag "$next"
+          git push origin "$next"

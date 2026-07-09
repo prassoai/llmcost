@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - name: go vet
+        run: go vet ./...
+      - name: staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          staticcheck ./...
+      # go test is the validation gate for data syncs: schema parse, table
+      # invariants, and data canaries over the vendored LiteLLM data.
+      - name: go test
+        run: go test ./...
+      # Fetched via the authenticated API, not raw.githubusercontent.com —
+      # anonymous raw fetches get 429-rate-limited from shared runner IPs.
+      - name: embedded data matches VENDORED_FROM pin
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha=$(sed -n 's/^commit: //p' VENDORED_FROM)
+          gh api -H "Accept: application/vnd.github.raw" \
+            "repos/BerriAI/litellm/contents/model_prices_and_context_window.json?ref=${sha}" > /tmp/upstream.json
+          cmp /tmp/upstream.json model_prices_and_context_window.json

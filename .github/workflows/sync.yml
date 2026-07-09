@@ -1,0 +1,83 @@
+# Weekly sync of the vendored LiteLLM pricing data.
+#
+# Fetches model_prices_and_context_window.json at upstream's current main
+# commit; if it differs from the vendored copy, rewrites the embed, bumps the
+# VENDORED_FROM pin, and opens a PR.
+#
+# The validation gate — go test: schema parse, table invariants, and data
+# canaries (LiteLLM has shipped a broken cost map before) — runs twice: once
+# here, because PRs opened with GITHUB_TOKEN do not trigger the ci workflow
+# automatically, and again in CI whenever a human pushes to or reopens the
+# PR. A gate failure still opens the PR (so the breakage is visible and
+# fixable on the sync branch) but fails this job to raise the alarm.
+# Consumers' own resolution tests catch dropped models when they bump the
+# module version.
+name: sync-litellm
+
+on:
+  schedule:
+    - cron: "43 6 * * 1" # Mondays 06:43 UTC — off the :00 stampede
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      # Fetched via the authenticated API, not raw.githubusercontent.com —
+      # anonymous fetches get 429-rate-limited from shared runner IPs.
+      - name: fetch upstream at pinned-to-be commit
+        id: fetch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha=$(gh api repos/BerriAI/litellm/commits/main --jq .sha)
+          gh api -H "Accept: application/vnd.github.raw" \
+            "repos/BerriAI/litellm/contents/model_prices_and_context_window.json?ref=${sha}" > /tmp/upstream.json
+          # No schema check here: it would abort (bash -e) before the PR is
+          # opened. The validation gate below covers it — a malformed or
+          # non-object embed fails go test — so breakage surfaces in a
+          # fixable PR instead of a silently dead workflow run.
+          if cmp -s /tmp/upstream.json model_prices_and_context_window.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+            cp /tmp/upstream.json model_prices_and_context_window.json
+            sed -i "s/^commit: .*/commit: ${sha}/" VENDORED_FROM
+          fi
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        if: steps.fetch.outputs.changed == 'true'
+        with:
+          go-version-file: go.mod
+      - name: validation gate
+        id: gate
+        if: steps.fetch.outputs.changed == 'true'
+        continue-on-error: true
+        run: go test ./...
+      - name: open PR
+        if: steps.fetch.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676 # v7
+        with:
+          branch: sync/litellm-prices
+          commit-message: "Sync LiteLLM pricing data to BerriAI/litellm@${{ steps.fetch.outputs.sha }}"
+          title: "Sync LiteLLM pricing data"
+          body: |
+            Automated weekly sync of `model_prices_and_context_window.json`
+            from BerriAI/litellm@${{ steps.fetch.outputs.sha }}.
+
+            Validation gate (`go test ./...` — schema parse, table
+            invariants, data canaries): **${{ steps.gate.outcome }}**. If it
+            failed, upstream restructured its pricing schema or dropped a
+            canary model — investigate before merging.
+
+            Merging auto-tags the next patch release.
+      - name: fail job if gate failed
+        if: steps.fetch.outputs.changed == 'true' && steps.gate.outcome == 'failure'
+        run: |
+          echo "::error::validation gate failed: pricing schema restructured or a canary model dropped upstream"
+          exit 1
