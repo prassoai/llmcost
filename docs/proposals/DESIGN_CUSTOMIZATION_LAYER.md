@@ -386,8 +386,11 @@ simple and independently testable.
 ### Internal implementation sketch
 
 The `Table` struct holds a reference to the parsed snapshot (the existing
-`sync.OnceValue` table) and the validated `Config`. No data is copied or
-merged at construction — resolution happens at query time:
+`sync.OnceValue` table) and a deep copy of the validated `Config`. `New`
+deep-copies all mutable state — alias maps, model override maps, rate
+schedules, and `*big.Rat` values — so the caller cannot mutate the
+`Table`'s internals after construction (matching the "immutable after
+construction" concurrency guarantee). Resolution happens at query time:
 
 ```go
 type Table struct {
