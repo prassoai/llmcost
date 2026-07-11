@@ -109,8 +109,10 @@ type Config struct {
     Aliases map[string]string
 
     // Models contains per-model overrides keyed by the LiteLLM pricing
-    // key (the post-alias-resolution key). An override for a model that
-    // does not exist in the snapshot is valid — it defines a new model.
+    // key (the post-alias-resolution key). An override with Rates or
+    // RateSchedule for a model not in the snapshot is valid — it defines
+    // a new model. A FlattenTiers-only override requires the model to
+    // exist in the snapshot (there must be tiers to flatten).
     Models map[string]ModelOverride
 }
 
@@ -178,6 +180,9 @@ type Table struct {
 //   - an alias whose target is not a snapshot key and not a
 //     Config.Models key (catches typos at init, not at query time;
 //     models not yet in the snapshot are declared in Config.Models)
+//   - a snapshot-dependent ModelOverride (FlattenTiers only, no Rates
+//     or RateSchedule) for a model not in the snapshot — FlattenTiers
+//     modifies snapshot rates, so there must be something to flatten
 //   - a ModelOverride with both Rates and RateSchedule set
 //   - a RateSchedule not sorted by EffectiveAt
 //   - a RateSchedule or Rates entry missing TierStandard
@@ -508,8 +513,9 @@ Requirements tests (one per R1-R8), following the existing pattern:
   existing no-cross-tier-fallback contract.
 - **TestMalformedConfigPanics**: each validation case in New panics —
   empty alias target, alias chain, alias target not in snapshot or
-  Config.Models, both Rates and RateSchedule, unsorted schedule,
-  missing TierStandard, unpriceable rates.
+  Config.Models, FlattenTiers-only override on a nonexistent snapshot
+  model, both Rates and RateSchedule, unsorted schedule, missing
+  TierStandard, unpriceable rates.
 - **TestZeroTableIsSnapshot**: `(&Table{}).Cost(model, usage, time.Time{})`
   equals `Cost(model, usage)` for every model.
 - **TestMustParseRat**: valid decimals parse exactly; invalid input
