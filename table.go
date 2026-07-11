@@ -201,6 +201,9 @@ func New(cfg Config) *Table {
 func cloneAndValidateServiceTierRates(model string, m map[ServiceTier]Rates) map[ServiceTier]Rates {
 	out := make(map[ServiceTier]Rates, len(m))
 	for tier, r := range m {
+		if _, ok := serviceSuffixes[tier]; !ok {
+			panic(fmt.Sprintf("llmcost: %s: unknown service tier %q", model, tier))
+		}
 		validateOverrideRates(model, tier, r)
 		out[tier] = r.clone()
 	}

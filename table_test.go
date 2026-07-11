@@ -411,6 +411,15 @@ func TestMalformedConfigPanics(t *testing.T) {
 		}},
 	})
 
+	mustPanicNew("unknown service tier in Rates", Config{
+		Models: map[string]ModelOverride{"x": {
+			Rates: map[ServiceTier]Rates{
+				TierStandard: {Base: TierRates{Input: MustParseRat("3e-6"), Output: MustParseRat("15e-6")}},
+				"turbo":      {Base: TierRates{Input: MustParseRat("3e-6"), Output: MustParseRat("15e-6")}},
+			},
+		}},
+	})
+
 	mustPanicNew("unpriceable rates: non-positive input", Config{
 		Models: map[string]ModelOverride{"x": {
 			Rates: map[ServiceTier]Rates{
