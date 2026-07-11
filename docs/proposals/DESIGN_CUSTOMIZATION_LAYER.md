@@ -175,6 +175,9 @@ type Table struct {
 //
 //   - an alias with an empty target
 //   - an alias whose target is itself an alias key (no chaining)
+//   - an alias whose target is not a snapshot key and not a
+//     Config.Models key (catches typos at init, not at query time;
+//     models not yet in the snapshot are declared in Config.Models)
 //   - a ModelOverride with both Rates and RateSchedule set
 //   - a RateSchedule not sorted by EffectiveAt
 //   - a RateSchedule or Rates entry missing TierStandard
@@ -409,19 +412,25 @@ func (t *Table) resolve(model string) string {
     return model
 }
 
+// rates resolves and CLONES: every returned Rates is a deep copy —
+// snapshot reads clone exactly like the existing RatesFor (Base.clone(),
+// cpRat, cloneRatMap), and override reads clone the stored override.
+// Callers can mutate the returned *big.Rat values without corrupting the
+// shared snapshot or the Table's override state.
 func (t *Table) rates(model string, tier ServiceTier, at time.Time) (Rates, bool) {
     model = t.resolve(model)
 
     if ovr, ok := t.models[model]; ok {
         switch {
         case len(ovr.schedule) > 0:
-            return ovr.scheduledRates(tier, at)
+            return ovr.scheduledRates(tier, at) // returns a clone
         case ovr.rates != nil:
             r, ok := ovr.rates[tier]
-            return r, ok
+            return r.clone(), ok // clone the stored override
         case ovr.flattenTiers:
             r, ok := table()[model][tier]
             if ok {
+                r = r.clone() // clone the snapshot
                 r.Tiers = nil
             }
             return r, ok
@@ -429,7 +438,7 @@ func (t *Table) rates(model string, tier ServiceTier, at time.Time) (Rates, bool
     }
 
     r, ok := table()[model][tier]
-    return r, ok
+    return r.clone(), ok // clone the snapshot
 }
 ```
 
@@ -498,12 +507,22 @@ Requirements tests (one per R1-R8), following the existing pattern:
   tier absent from the override map fails (ok=false), matching the
   existing no-cross-tier-fallback contract.
 - **TestMalformedConfigPanics**: each validation case in New panics —
-  empty alias target, alias chain, both Rates and RateSchedule,
-  unsorted schedule, missing TierStandard, unpriceable rates.
+  empty alias target, alias chain, alias target not in snapshot or
+  Config.Models, both Rates and RateSchedule, unsorted schedule,
+  missing TierStandard, unpriceable rates.
 - **TestZeroTableIsSnapshot**: `(&Table{}).Cost(model, usage, time.Time{})`
   equals `Cost(model, usage)` for every model.
 - **TestMustParseRat**: valid decimals parse exactly; invalid input
   panics.
+- **TestConfigDeepCopy**: mutating the input `Config` after `New` —
+  maps, `RateSchedule` slice, `*big.Rat` values — does not change
+  billing results from the constructed `Table`.
+- **TestReturnedRatesAreCopies**: mutating a `Table.RatesFor` return
+  value (base rats, tier rats, Fast, Geo, RegionalUplift) does not
+  corrupt the snapshot or other `Table` instances — the same discipline
+  as the existing `TestRatesForReturnsCopies`.
+- **TestConcurrentCost**: concurrent `Table.Cost` calls on the same
+  `Table` with `-race` — the immutability guarantee under contention.
 
 ### Consumer tests
 
