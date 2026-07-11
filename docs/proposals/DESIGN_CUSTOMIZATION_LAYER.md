@@ -568,15 +568,14 @@ tiers.
    tier came from the same upstream data). Per-tier flatten adds
    complexity for no known use case.
 
-4. **Alias targets that are not direct LiteLLM keys.** Should an alias
-   target be required to exist in the snapshot (or as an override), or
-   can it be any string that eventually resolves through ModelSelector?
-   The proposed design requires the alias target to be a LiteLLM pricing
-   key (a direct table key). ModelSelector resolution is the caller's
-   responsibility before aliasing. **Recommendation:** keep this
-   constraint. Aliases are a simple rename layer; coupling them to
-   ModelSelector's provider grammar makes both harder to reason about
-   and test.
+4. **~~Alias targets that are not direct LiteLLM keys.~~** Resolved:
+   `New` validates that each alias target exists in the snapshot or in
+   `Config.Models` — a target present in neither is a dangling reference
+   (a typo that always returns `ok=false`) and panics at init, upholding
+   R7's fail-at-init principle. Models not yet in the snapshot satisfy
+   the check by being declared in `Config.Models` (consistent with OQ7).
+   ModelSelector resolution remains the caller's responsibility before
+   aliasing; aliases are a simple rename layer.
 
 5. **Tag strategy.** This adds new exports but does not change existing
    signatures. A minor tag (v0.2.0) signals "new API surface, existing
@@ -596,7 +595,10 @@ tiers.
    `RateSchedule` for a model not in the snapshot is valid and defines
    a new model. This is useful when a new model ships before the
    weekly snapshot sync picks it up. **Recommendation:** allow it.
-   Validation should still require priceable rates.
+   Validation should still require priceable rates. Note: this is
+   compatible with the alias-target-existence validation (OQ4,
+   resolved) — an alias to a not-yet-vendored model satisfies the
+   check as long as the model is declared in `Config.Models`.
 
 ## Non-goals
 
