@@ -164,6 +164,19 @@
 // output rates for it — entries without pricing (or with zero rates) return
 // ok=false.
 //
+// # Consumer customization layer
+//
+// [Table] extends the embedded snapshot with consumer-declared overrides:
+// model aliases, tier-structure suppression, static rate overrides, and
+// date-gated rate schedules. Construct a [Table] with [New] and a [Config]
+// that declares the overrides; the zero-value Table behaves identically to
+// the package-level functions (no overrides). [Table.Cost] and
+// [Table.RatesFor] mirror [Cost] and [RatesFor] with an added timestamp
+// parameter for rate-schedule resolution. [MustParseRat] is a convenience
+// for declaring exact rates in [Config] literals. See the [Config] and
+// [ModelOverride] type docs for the override mechanisms and [New] for the
+// construction-time validation contract.
+//
 // # Vendored data
 //
 // model_prices_and_context_window.json is embedded byte-identical from

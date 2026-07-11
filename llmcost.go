@@ -344,18 +344,7 @@ func RatesFor(model string, tier ServiceTier) (Rates, bool) {
 	if !ok {
 		return Rates{}, false
 	}
-	out := Rates{
-		Base:            r.Base.clone(),
-		Tiers:           make([]Tier, len(r.Tiers)),
-		Fast:            cpRat(r.Fast),
-		Geo:             cloneRatMap(r.Geo),
-		RegionalUplift:  cloneRatMap(r.RegionalUplift),
-		litellmProvider: r.litellmProvider,
-	}
-	for i, t := range r.Tiers {
-		out.Tiers[i] = Tier{AbovePromptTokens: t.AbovePromptTokens, TierRates: t.clone()}
-	}
-	return out, true
+	return r.clone(), true
 }
 
 // components are one response's token counts normalized to disjoint billable
