@@ -186,8 +186,11 @@ type Table struct {
 //   - a ModelOverride with both Rates and RateSchedule set
 //   - a RateSchedule not sorted by EffectiveAt
 //   - a RateSchedule or Rates entry missing TierStandard
-//   - override rates that are not priceable (non-positive input or
-//     output, negative cache rates — the same bar as the snapshot)
+//   - override rates that violate the same invariants the snapshot
+//     parser enforces (TestTableInvariants): non-positive input or
+//     output, negative cache rates, non-positive multipliers (Fast,
+//     Geo, RegionalUplift), and context-window tiers with non-positive
+//     or non-ascending thresholds or unpriceable tier rates
 //
 // Misconfiguration is a bug and fails at init, not at query time.
 func New(cfg Config) *Table
