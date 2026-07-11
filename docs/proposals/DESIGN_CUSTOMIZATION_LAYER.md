@@ -394,9 +394,12 @@ construction" concurrency guarantee). Resolution happens at query time:
 
 ```go
 type Table struct {
-    aliases  map[string]string
-    models   map[string]modelOverride // validated, schedule sorted
-    snapshot func() map[string]map[ServiceTier]Rates // the existing table()
+    aliases map[string]string
+    models  map[string]modelOverride // validated, schedule sorted
+    // No snapshot field — the implementation calls the package-level
+    // table() (sync.OnceValue) directly, so a zero-value Table works:
+    // nil maps mean no aliases, no overrides, every call falls through
+    // to the snapshot.
 }
 
 func (t *Table) resolve(model string) string {
@@ -417,7 +420,7 @@ func (t *Table) rates(model string, tier ServiceTier, at time.Time) (Rates, bool
             r, ok := ovr.rates[tier]
             return r, ok
         case ovr.flattenTiers:
-            r, ok := t.snapshot()[model][tier]
+            r, ok := table()[model][tier]
             if ok {
                 r.Tiers = nil
             }
@@ -425,7 +428,7 @@ func (t *Table) rates(model string, tier ServiceTier, at time.Time) (Rates, bool
         }
     }
 
-    r, ok := t.snapshot()[model][tier]
+    r, ok := table()[model][tier]
     return r, ok
 }
 ```
