@@ -167,15 +167,23 @@
 // # Consumer customization layer
 //
 // [Table] extends the embedded snapshot with consumer-declared overrides:
-// model aliases, tier-structure suppression, static rate overrides, and
-// date-gated rate schedules. Construct a [Table] with [New] and a [Config]
-// that declares the overrides; the zero-value Table behaves identically to
-// the package-level functions (no overrides). [Table.Cost] and
-// [Table.RatesFor] mirror [Cost] and [RatesFor] with an added timestamp
-// parameter for rate-schedule resolution. [MustParseRat] is a convenience
-// for declaring exact rates in [Config] literals. See the [Config] and
-// [ModelOverride] type docs for the override mechanisms and [New] for the
-// construction-time validation contract.
+// model aliases and per-model rate overrides (overwrite or remove).
+// Construct a [Table] with [New] and a [Config] that declares the
+// overrides; the zero-value Table behaves identically to the package-level
+// functions (no overrides). [Table.Cost] and [Table.RatesFor] mirror
+// [Cost] and [RatesFor] with alias and override resolution.
+// [MustParseRat] is a convenience for declaring exact rates in [Config]
+// literals. See the [Config] type doc for the override mechanisms and
+// [New] for the construction-time validation contract.
+//
+// The two override primitives:
+//
+//   - Overwrite: Overrides[key] = &rates replaces the model's rates
+//     wholesale. The caller controls the tier structure directly — omit
+//     [Rates].Tiers for flat pricing, include them for context-window
+//     tiers. The override applies at the standard service tier only.
+//   - Remove: Overrides[key] = nil suppresses the model — [Table.Cost]
+//     and [Table.RatesFor] return ok=false for it.
 //
 // # Vendored data
 //
