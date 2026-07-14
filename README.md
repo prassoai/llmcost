@@ -27,12 +27,13 @@ cost, ok := llmcost.Cost("claude-opus-4-8", llmcost.ClaudeUsage{
 })
 ```
 
-**OpenAI / codex** (overlapping counts — `input_tokens` INCLUDES cached):
+**OpenAI / codex** (overlapping counts — `input_tokens` INCLUDES cached and cache-write):
 
 ```go
-cost, ok := llmcost.Cost("gpt-5.4", llmcost.OpenAIUsage{
-    InputTokens:       46200, // usage.input_tokens — total, cached included
-    CachedInputTokens: 45000, // input_tokens_details.cached_tokens — subset
+cost, ok := llmcost.Cost("gpt-5.6-sol", llmcost.OpenAIUsage{
+    InputTokens:       46200, // usage.input_tokens — total, cached and cache-write included
+    CachedInputTokens: 45000, // input_tokens_details.cached_tokens — cache-read subset
+    CacheWriteTokens:  600,   // input_tokens_details.cache_write_tokens — GPT-5.6+, 1.25× input
     OutputTokens:      800,   // reasoning tokens are a subset, already included
     DataResidency:     "",    // "eu"/"us" when served by eu./us.api.openai.com — bills the 1.1× uplift
     ServiceTier:       "",    // "" = standard; TierFlex/TierPriority bill that tier's rates
@@ -71,11 +72,13 @@ modeled.
 ## Semantics
 
 - **Real cache rates, no fallback.** Cache reads bill at the model's
-  `cache_read_input_token_cost` (0.1× input for Anthropic; OpenAI reports
-  reads only). Cache writes bill **by TTL**: the 1-hour subset at
+  `cache_read_input_token_cost` (0.1× input for Anthropic and OpenAI). Cache
+  writes bill **by TTL** for Anthropic: the 1-hour subset at
   `cache_creation_input_token_cost_above_1hr` (2× input) and the 5-minute
   remainder at `cache_creation_input_token_cost` (1.25× input) — the 1h rate
-  participates in context-window tiers too. A model missing a rate for a
+  participates in context-window tiers too. OpenAI has a single cache-write
+  TTL: GPT-5.6+ bill `CacheWriteTokens` at `cache_creation_input_token_cost`
+  (1.25× input); pre-5.6 models bill reads only. A model missing a rate for a
   reported component *fails* to price — never approximated at another rate.
 - **Context-window tiers.** Models with LiteLLM `*_above_Xk_tokens` pricing
   (Anthropic's 1M-context beta >200k, GPT-5.4/5.5 >272k, Gemini >200k) are

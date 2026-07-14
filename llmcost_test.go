@@ -263,6 +263,74 @@ func TestOpenAITierCountsCachedTokens(t *testing.T) {
 	}
 }
 
+// gpt56Spec mirrors gpt-5.6-sol: OpenAI-style with a cache-CREATION rate
+// (1.25× uncached input), the first OpenAI family to bill cache writes, plus
+// the 272k context tier with a tiered cache-creation rate. No 1-hour TTL —
+// OpenAI has a single cache-write bucket.
+const gpt56Spec = `{
+	"input_cost_per_token": 5e-06,
+	"cache_read_input_token_cost": 5e-07,
+	"cache_creation_input_token_cost": 6.25e-06,
+	"output_cost_per_token": 3e-05,
+	"input_cost_per_token_above_272k_tokens": 1e-05,
+	"cache_read_input_token_cost_above_272k_tokens": 1e-06,
+	"cache_creation_input_token_cost_above_272k_tokens": 1.25e-05,
+	"output_cost_per_token_above_272k_tokens": 4.5e-05,
+	"litellm_provider": "openai"
+}`
+
+// TestOpenAICacheWriteNormalization encodes GPT-5.6 cache-write billing: the
+// cache_write_tokens subset of input bills at the cache-creation rate (1.25×
+// uncached input), disjoint from both plain input and cache reads. Raw usage
+// InputTokens=1175 splits into 500 plain + 50 read + 625 write:
+// 500×5e-6 + 50×5e-7 + 625×6.25e-6 + 3000×3e-5 = $0.09643125 → ceil 9644 nls.
+func TestOpenAICacheWriteNormalization(t *testing.T) {
+	r := mustParse(t, gpt56Spec)
+	got, ok := cost(r, components{input: 500, cacheRead: 50, cacheCreation: 625, output: 3000}, premium{})
+	if !ok || got != 9644 {
+		t.Fatalf("cost = %d, %v; want 9644, true", got, ok)
+	}
+	// The exported path must split raw OpenAI counts the same way: cache-write
+	// is subtracted out of plain input (not double-billed) and priced at the
+	// cache-creation rate.
+	viaAPI, ok2 := price(r, OpenAIUsage{InputTokens: 1175, CachedInputTokens: 50, CacheWriteTokens: 625, OutputTokens: 3000})
+	if !ok2 || viaAPI != got {
+		t.Fatalf("price(OpenAIUsage) = %d, %v; want %d, true", viaAPI, ok2, got)
+	}
+}
+
+// TestOpenAICacheWriteCountsTowardTier pins that OpenAI cache-write tokens
+// count toward the 272k context-window threshold. OpenAI's long-context rule
+// applies the higher rate to "requests above 272K input tokens", and
+// input_tokens is the full total of which cache-write is a subset — so a
+// cache-write token that pushes the total past 272k re-prices the ENTIRE
+// request. (This is deliberately the opposite of back's
+// TestCacheWriteDoesNotFlipOpenAITier; the OpenAI docs' definition governs.)
+func TestOpenAICacheWriteCountsTowardTier(t *testing.T) {
+	r := mustParse(t, gpt56Spec)
+	// 272000 total → base tier: 272000×5e-6 = $1.36 = 136000 nls.
+	if got, ok := cost(r, components{input: 272000}, premium{}); !ok || got != 136000 {
+		t.Fatalf("at threshold: cost = %d, %v; want 136000, true", got, ok)
+	}
+	// One cache-write token makes the total 272001 (> 272000) → above tier,
+	// whole request re-priced: 272000×1e-5 + 1×1.25e-5 = $2.7200125 → ceil 272002.
+	if got, ok := cost(r, components{input: 272000, cacheCreation: 1}, premium{}); !ok || got != 272002 {
+		t.Fatalf("above threshold via cache-write: cost = %d, %v; want 272002, true", got, ok)
+	}
+}
+
+// TestOpenAICacheWriteExceedsInputPanics encodes the disjointness invariant:
+// cached + cache-write are subsets of input_tokens, so their sum exceeding it
+// is a malformed response and panics rather than yielding negative plain input.
+func TestOpenAICacheWriteExceedsInputPanics(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic when CachedInputTokens+CacheWriteTokens exceeds InputTokens")
+		}
+	}()
+	OpenAIUsage{InputTokens: 100, CachedInputTokens: 60, CacheWriteTokens: 50}.disjoint()
+}
+
 // gpt55Spec models gpt-5.5's real standard/flex/priority rates (flex is
 // exactly half, priority exactly double) plus a priority context-window tier
 // in the gpt-5.1-codex-era shape (input and cache-read tiered, output

@@ -27,11 +27,13 @@
 //		InferenceGeo:               u.InferenceGeo, // usage.inference_geo when present
 //	})
 //
-// OpenAI reports overlapping counts — input_tokens INCLUDES cached_tokens:
+// OpenAI reports overlapping counts — input_tokens INCLUDES both the cached
+// and cache-write subsets:
 //
-//	llmcost.Cost("gpt-5.4", llmcost.OpenAIUsage{
-//		InputTokens:       u.InputTokens,       // total input, cached included
-//		CachedInputTokens: u.CachedInputTokens, // the cached subset of InputTokens
+//	llmcost.Cost("gpt-5.6-sol", llmcost.OpenAIUsage{
+//		InputTokens:       u.InputTokens,       // total input, cached and cache-write included
+//		CachedInputTokens: u.CachedInputTokens, // the cache-read subset of InputTokens
+//		CacheWriteTokens:  u.CacheWriteTokens,  // the cache-write subset (GPT-5.6+; 1.25× input)
 //		OutputTokens:      u.OutputTokens,      // reasoning tokens already included
 //		DataResidency:     residency,           // "eu"/"us" when the host was eu./us.api.openai.com
 //		ServiceTier:       tier,                // "" = standard; TierFlex / TierPriority bill the tier's own rates
@@ -74,8 +76,11 @@
 // Cache reads bill at the model's cache_read_input_token_cost. Cache writes
 // bill by TTL: the 1-hour subset of ClaudeUsage.CacheCreationInputTokens at
 // cache_creation_input_token_cost_above_1hr (2× input) and the 5-minute
-// remainder at cache_creation_input_token_cost (1.25× input). OpenAI bills
-// reads only. These are the providers' real rates, and there is deliberately
+// remainder at cache_creation_input_token_cost (1.25× input). OpenAI has a
+// single cache-write TTL: GPT-5.6+ bill OpenAIUsage.CacheWriteTokens at
+// cache_creation_input_token_cost (1.25× input) with no 1-hour split, and
+// pre-5.6 models bill reads only. These are the providers' real rates, and
+// there is deliberately
 // NO fallback in any direction: a model without a rate for a component —
 // including a 5m-only model handed 1h writes — fails to price usage that
 // reports those tokens.
