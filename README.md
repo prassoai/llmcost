@@ -31,7 +31,7 @@ cost, ok := llmcost.Cost("claude-opus-4-8", llmcost.ClaudeUsage{
 
 ```go
 cost, ok := llmcost.Cost("gpt-5.6-sol", llmcost.OpenAIUsage{
-    InputTokens:       46200, // usage.input_tokens — total, cached and cache-write included
+    InputTokens:       46800, // usage.input_tokens — total (45000 cached + 600 write + 1200 uncached)
     CachedInputTokens: 45000, // input_tokens_details.cached_tokens — cache-read subset
     CacheWriteTokens:  600,   // input_tokens_details.cache_write_tokens — GPT-5.6+, 1.25× input
     OutputTokens:      800,   // reasoning tokens are a subset, already included
