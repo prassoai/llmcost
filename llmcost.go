@@ -98,16 +98,26 @@ type ClaudeUsage struct {
 // OpenAIUsage holds the RAW token counts of one OpenAI API response, named
 // after the API's usage fields. OpenAI reports OVERLAPPING counts:
 //
-//	InputTokens       = usage.input_tokens (a.k.a. prompt_tokens) — total input, INCLUDES the cached portion
-//	CachedInputTokens = input_tokens_details.cached_tokens        — the cached subset of InputTokens
+//	InputTokens       = usage.input_tokens (a.k.a. prompt_tokens) — TOTAL input, INCLUDES both the cached and cache-write portions
+//	CachedInputTokens = input_tokens_details.cached_tokens        — the cache-READ subset of InputTokens, billed at the cache-read rate
+//	CacheWriteTokens  = input_tokens_details.cache_write_tokens   — the cache-WRITE subset of InputTokens, billed at the cache-creation rate
 //	OutputTokens      = usage.output_tokens                       — total output; reasoning tokens are a subset, already included
 //
 // Copy the fields straight from the response; the uncached remainder
-// (InputTokens - CachedInputTokens) is computed internally. Do NOT
-// pre-subtract — that is this module's job, and doing it twice under-bills.
-// CachedInputTokens > InputTokens is impossible in a real response and
-// panics. OpenAI does not bill cache writes, so there is no cache-creation
-// field.
+// (InputTokens - CachedInputTokens - CacheWriteTokens) is computed
+// internally. Do NOT pre-subtract — that is this module's job, and doing it
+// twice under-bills. CachedInputTokens and CacheWriteTokens are DISJOINT
+// subsets of InputTokens; their sum exceeding InputTokens is impossible in a
+// real response and panics.
+//
+// Cache writes: GPT-5.6 and later bill CacheWriteTokens at the model's
+// cache-creation rate (1.25× uncached input); earlier models report no writes
+// and carry no cache-creation rate, so a nonzero count on one fails to price
+// rather than billing zero. OpenAI has a single cache-write TTL — there is no
+// 1-hour split as with Anthropic. The request's total prompt size — which
+// decides context-window pricing tiers — is the full InputTokens (cached and
+// cache-write included), matching OpenAI's "requests above 272K input tokens"
+// long-context rule, since both are subsets of that total.
 //
 // DataResidency is the data-residency region of the host that served the
 // request: "eu" for eu.api.openai.com, "us" for us.api.openai.com, "" for
@@ -128,6 +138,7 @@ type ClaudeUsage struct {
 type OpenAIUsage struct {
 	InputTokens       int64
 	CachedInputTokens int64
+	CacheWriteTokens  int64
 	OutputTokens      int64
 	ServiceTier       ServiceTier
 	DataResidency     string
@@ -137,9 +148,9 @@ type OpenAIUsage struct {
 // CacheCreation is the default 5-minute-TTL cache-write rate
 // (cache_creation_input_token_cost); CacheCreation1h is the 1-hour-TTL rate
 // (cache_creation_input_token_cost_above_1hr). A nil rate means the provider
-// does not price that component (e.g. OpenAI models have no cache-write
-// rates); costing usage with a positive count on a nil component fails rather
-// than billing zero.
+// does not price that component (e.g. pre-GPT-5.6 OpenAI models have no
+// cache-write rate, and OpenAI has no 1-hour TTL rate at all); costing usage
+// with a positive count on a nil component fails rather than billing zero.
 type TierRates struct {
 	Input, CacheRead, CacheCreation, CacheCreation1h, Output *big.Rat
 }
@@ -296,22 +307,23 @@ func (u ClaudeUsage) premium(r Rates) (premium, bool) {
 func (u ClaudeUsage) tier() (ServiceTier, bool) { return TierStandard, true }
 
 func (u OpenAIUsage) disjoint() components {
-	if u.InputTokens < 0 || u.CachedInputTokens < 0 || u.OutputTokens < 0 {
+	if u.InputTokens < 0 || u.CachedInputTokens < 0 || u.CacheWriteTokens < 0 || u.OutputTokens < 0 {
 		panic(fmt.Sprintf("llmcost: negative token counts: %+v", u))
 	}
-	if u.CachedInputTokens > u.InputTokens {
-		panic(fmt.Sprintf("llmcost: CachedInputTokens exceeds InputTokens (cached is a subset of input in OpenAI usage): %+v", u))
+	if u.CachedInputTokens+u.CacheWriteTokens > u.InputTokens {
+		panic(fmt.Sprintf("llmcost: CachedInputTokens+CacheWriteTokens exceeds InputTokens (both are disjoint subsets of input in OpenAI usage): %+v", u))
 	}
 	return components{
-		input:     u.InputTokens - u.CachedInputTokens, // OpenAI's input_tokens includes the cached subset
-		cacheRead: u.CachedInputTokens,
-		output:    u.OutputTokens,
+		input:         u.InputTokens - u.CachedInputTokens - u.CacheWriteTokens, // OpenAI's input_tokens includes both subsets
+		cacheRead:     u.CachedInputTokens,
+		cacheCreation: u.CacheWriteTokens, // OpenAI has a single cache-write TTL; no 1h split
+		output:        u.OutputTokens,
 	}
 }
 
 // premium applies the model's regional-processing uplift to every component
-// — OpenAI's uplift is a flat multiplier on all token costs, cache reads
-// included. A region the model has no uplift for bills at standard rates
+// — OpenAI's uplift is a flat multiplier on all token costs, cache reads and
+// writes included. A region the model has no uplift for bills at standard rates
 // (see the DataResidency field doc for why absent ≠ unpriced here).
 func (u OpenAIUsage) premium(r Rates) (premium, bool) {
 	if f, ok := r.RegionalUplift[strings.ToLower(u.DataResidency)]; ok {
