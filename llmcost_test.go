@@ -672,7 +672,7 @@ func TestTableInvariants(t *testing.T) {
 // model id THEY bill resolves, so a dropped model they depend on fails their
 // build, not silently bills zero.
 func TestVendoredDataCanaries(t *testing.T) {
-	for _, model := range []string{"claude-opus-4-8", "claude-haiku-4-5", "gpt-5.4", "gpt-4o", "codex-mini-latest"} {
+	for _, model := range []string{"claude-opus-5", "claude-opus-4-8", "claude-haiku-4-5", "gpt-5.4", "gpt-4o", "codex-mini-latest"} {
 		if _, ok := RatesFor(model, TierStandard); !ok {
 			t.Errorf("canary %s no longer resolves", model)
 		}
@@ -708,6 +708,17 @@ func TestVendoredDataCanaries(t *testing.T) {
 	// starts billing standard — verify against upstream before merging.
 	if r, ok := RatesFor("claude-opus-4-8", TierStandard); !ok || r.Fast == nil || r.Fast.Cmp(big.NewRat(2, 1)) != 0 || r.Geo["us"] == nil {
 		t.Errorf("claude-opus-4-8 multipliers = fast %v, geo %v; want fast 2 and a us factor", r.Fast, r.Geo)
+	}
+	// claude-opus-5 launched 2026-07-24 at $5/M input, $25/M output — the same
+	// rates as opus-4-8 (Anthropic's announcement; corroborated by the LiteLLM
+	// entry vendored here). Pin the exact base rates and the fast/us multipliers
+	// so a sync that renames the key or shifts the price fails loudly rather
+	// than silently underbilling a model we serve as the default Opus.
+	if r, ok := RatesFor("claude-opus-5", TierStandard); !ok ||
+		r.Base.Input.Cmp(big.NewRat(5, 1_000_000)) != 0 ||
+		r.Base.Output.Cmp(big.NewRat(25, 1_000_000)) != 0 ||
+		r.Fast == nil || r.Fast.Cmp(big.NewRat(2, 1)) != 0 || r.Geo["us"] == nil {
+		t.Errorf("claude-opus-5 rates = %+v (fast %v, geo %v); want $5/M in, $25/M out, fast 2, a us factor", r.Base, r.Fast, r.Geo)
 	}
 	if r, ok := RatesFor("gpt-5.4", TierStandard); !ok || r.RegionalUplift["eu"] == nil || r.RegionalUplift["us"] == nil {
 		t.Errorf("gpt-5.4 regional uplifts = %v; want eu and us factors", r.RegionalUplift)
