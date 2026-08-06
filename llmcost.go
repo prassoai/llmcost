@@ -33,15 +33,15 @@ const nlsPerUSD = 100_000
 // own per-token rates, carried in LiteLLM's data as *_flex and *_priority
 // field variants. The tier is an OpenAI request parameter, so like every
 // provider-specific pricing input it lives on the provider's usage type —
-// [OpenAIUsage.ServiceTier] — and Anthropic usage always bills the standard
-// tier; the sealed [Usage] interface makes a flex Claude request
-// inexpressible. On the field, the zero value means standard (matching the
-// other usage mode fields); any other value must be one of the constants
-// below — an unrecognized tier is unpriced (ok=false), never a silent
-// standard fallback — and there is no cross-tier fallback: a model without
-// rates at the requested tier fails rather than billing another tier's
-// rates (a ~2× error in either direction). LiteLLM's *_batches variants
-// (Batch API) are not service tiers and are not modeled.
+// [OpenAIUsage.ServiceTier] — while Anthropic and Fireworks usage always
+// bill the standard tier; the sealed [Usage] interface makes a flex Claude
+// request inexpressible. On the field, the zero value means standard
+// (matching the other usage mode fields); any other value must be one of
+// the constants below — an unrecognized tier is unpriced (ok=false), never
+// a silent standard fallback — and there is no cross-tier fallback: a model
+// without rates at the requested tier fails rather than billing another
+// tier's rates (a ~2× error in either direction). LiteLLM's *_batches
+// variants (Batch API) are not service tiers and are not modeled.
 type ServiceTier string
 
 const (
@@ -144,6 +144,41 @@ type OpenAIUsage struct {
 	DataResidency     string
 }
 
+// FireworksUsage holds the RAW token counts of one Fireworks AI response.
+// Fireworks serves an OpenAI-compatible API and reports OVERLAPPING counts,
+// like OpenAI:
+//
+//	InputTokens  = usage.prompt_tokens                    — TOTAL input, INCLUDES the cached portion
+//	CachedTokens = prompt_tokens_details.cached_tokens    — the cache-READ subset of InputTokens
+//	OutputTokens = usage.completion_tokens                — total output; reasoning tokens are a subset, already included
+//
+// Copy the fields straight from the response; the uncached remainder
+// (InputTokens - CachedTokens) is computed internally. Do NOT pre-subtract.
+// CachedTokens exceeding InputTokens is impossible in a real response and
+// panics.
+//
+// The fields Fireworks does NOT have are deliberately absent rather than
+// merely unpriceable, so a caller cannot express them:
+//
+//   - No cache-write field. Fireworks' prompt cache is automatic and
+//     unbilled, and no upstream Fireworks entry carries a
+//     cache_creation_input_token_cost.
+//   - No service tier. Fireworks publishes no *_flex / *_priority rate
+//     variants; every response bills [TierStandard].
+//   - No data residency or geo. Fireworks publishes no
+//     regional_processing_uplift_* fields and no provider_specific_entry
+//     multipliers, so no Fireworks response carries a price premium.
+//
+// A model whose upstream entry has no cache-read rate — several Fireworks
+// models list none — fails to price usage reporting cached tokens rather
+// than billing them as uncached or free, the same no-fallback rule the
+// other providers follow.
+type FireworksUsage struct {
+	InputTokens  int64
+	CachedTokens int64
+	OutputTokens int64
+}
+
 // TierRates are exact USD-per-token prices for the five billable components.
 // CacheCreation is the default 5-minute-TTL cache-write rate
 // (cache_creation_input_token_cost); CacheCreation1h is the 1-hour-TTL rate
@@ -194,11 +229,14 @@ type Rates struct {
 }
 
 // Usage is one response's raw token usage. It is implemented only by
-// [ClaudeUsage] and [OpenAIUsage] — the interface is sealed, so the only way
-// to supply usage is to hand a provider type its RAW reported counts. Each
-// provider type normalizes its own reporting convention (Anthropic's
-// disjoint counts, OpenAI's overlapping ones) into the module's disjoint
-// billable components; callers never do that arithmetic.
+// [ClaudeUsage], [OpenAIUsage], and [FireworksUsage] — the interface is
+// sealed, so the only way to supply usage is to hand a provider type its RAW
+// reported counts. Each provider type normalizes its own reporting
+// convention (Anthropic's disjoint counts, OpenAI's and Fireworks'
+// overlapping ones) into the module's disjoint billable components; callers
+// never do that arithmetic. Each type also carries exactly the pricing modes
+// its provider actually has, so a mode a provider does not offer is
+// inexpressible rather than merely unpriceable.
 type Usage interface {
 	// disjoint validates the raw counts and normalizes them into disjoint
 	// billable components. Counts impossible in a real response — negative,
@@ -225,17 +263,17 @@ type premium struct {
 
 // Cost prices one response in nls. model is the LiteLLM pricing key. Cost
 // normalizes the provider's raw usage into disjoint components, resolves
-// the service tier from the usage ([OpenAIUsage.ServiceTier]; Anthropic
-// usage always bills standard) and the context-window tier from the total
-// prompt size within it, computes rate × tokens exactly per component
-// (scaled by any fast/geo/residency multiplier the usage triggers), sums in
-// USD, and ceiling-rounds only the final total, so sub-nls token costs
-// accumulate instead of truncating to zero and any non-zero usage costs at
-// least 1 nls. ok is false if the model is unknown, has no priceable rates
-// at the usage's service tier (e.g. a model LiteLLM lists no *_flex fields
-// for), the tier value is unrecognized, or the tier lacks a rate for a
-// component — or a multiplier for a mode — the usage reports. There is
-// deliberately no fallback to another tier's rates.
+// the service tier from the usage ([OpenAIUsage.ServiceTier]; Anthropic and
+// Fireworks usage always bill standard) and the context-window tier from
+// the total prompt size within it, computes rate × tokens exactly per
+// component (scaled by any fast/geo/residency multiplier the usage
+// triggers), sums in USD, and ceiling-rounds only the final total, so
+// sub-nls token costs accumulate instead of truncating to zero and any
+// non-zero usage costs at least 1 nls. ok is false if the model is unknown,
+// has no priceable rates at the usage's service tier (e.g. a model LiteLLM
+// lists no *_flex fields for), the tier value is unrecognized, or the tier
+// lacks a rate for a component — or a multiplier for a mode — the usage
+// reports. There is deliberately no fallback to another tier's rates.
 func Cost(model string, u Usage) (Nls, bool) {
 	c := u.disjoint() // before the lookup: impossible counts panic even for unknown models and tiers
 	tier, ok := u.tier()
@@ -345,6 +383,29 @@ func (u OpenAIUsage) tier() (ServiceTier, bool) {
 	}
 	return "", false
 }
+
+func (u FireworksUsage) disjoint() components {
+	if u.InputTokens < 0 || u.CachedTokens < 0 || u.OutputTokens < 0 {
+		panic(fmt.Sprintf("llmcost: negative token counts: %+v", u))
+	}
+	if u.CachedTokens > u.InputTokens {
+		panic(fmt.Sprintf("llmcost: CachedTokens exceeds InputTokens (cached is a subset of input in Fireworks usage): %+v", u))
+	}
+	return components{
+		input:     u.InputTokens - u.CachedTokens, // Fireworks' prompt_tokens includes the cached subset
+		cacheRead: u.CachedTokens,
+		output:    u.OutputTokens,
+	}
+}
+
+// premium is always unscaled: Fireworks publishes no regional uplifts and no
+// provider_specific_entry multipliers, so no Fireworks response carries a
+// price premium. The type has no mode fields to resolve.
+func (u FireworksUsage) premium(Rates) (premium, bool) { return premium{}, true }
+
+// tier is always standard: Fireworks publishes no *_flex / *_priority rate
+// variants, and the type has no tier field.
+func (u FireworksUsage) tier() (ServiceTier, bool) { return TierStandard, true }
 
 // RatesFor returns the raw per-token rates for model (a LiteLLM pricing
 // key) at a service tier, for callers that want them. ok is false if the

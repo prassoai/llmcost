@@ -10,8 +10,9 @@ import (
 // same vendor model bills differently per provider (and per Azure data
 // zone: azure/us/gpt-5.4 carries a ~10% premium over azure/gpt-5.4), so the
 // provider is part of model identity here. The constants cover Anthropic
-// and OpenAI models everywhere LiteLLM prices them: direct, Bedrock,
-// Vertex, and Azure.
+// and OpenAI models everywhere LiteLLM prices them — direct, Bedrock,
+// Vertex, and Azure — plus Fireworks AI, which serves open-weight models
+// from other vendors entirely (DeepSeek, Moonshot, MiniMax, Zhipu, Qwen).
 type Provider string
 
 const (
@@ -39,6 +40,18 @@ const (
 	// the caller's Vertex model id verbatim — "@" version suffixes and
 	// publisher paths included ("claude-sonnet-4-5@20250929").
 	ProviderVertexAI Provider = "vertex_ai"
+	// ProviderFireworks is Fireworks AI: keys are fireworks_ai/{model} with
+	// the Fireworks model path verbatim — the deployment path
+	// ("accounts/fireworks/models/deepseek-v4-flash"), a router path
+	// ("accounts/fireworks/routers/kimi-k2p6-fast"), or the bare short name
+	// upstream lists some models under ("deepseek-v4-flash"). Region must be
+	// empty: Fireworks does not price by region.
+	//
+	// Unlike the clouds, Fireworks does not RENAME the models it serves — the
+	// key is the prefix plus the caller's own model path — so there is no
+	// canonical-name scheme to invert and [ModelSelector.Key] resolves
+	// Fireworks models by their native id alone.
+	ProviderFireworks Provider = "fireworks_ai"
 )
 
 // ModelSelector identifies a model by how it was served, in the caller's own
@@ -61,6 +74,10 @@ const (
 //     resolves to the provider's dated variant when exactly one exists and
 //     FAILS when several do — never guessing which date the caller meant.
 //
+// Spelling 2 applies only to providers that RENAME what they serve.
+// Fireworks does not: its keys carry the caller's own model path verbatim,
+// so Fireworks selectors resolve by spelling 1 alone.
+//
 // [ModelSelector.Key] is DETERMINISTIC and verified; it never fuzzy-matches
 // and never falls back to a differently-priced key. This is the module's
 // whole alias policy: the key grammar and the clouds' renaming schemes
@@ -78,9 +95,10 @@ type ModelSelector struct {
 	// Azure data zones ("us", "eu"), Bedrock cross-region inference
 	// profiles ("us", "eu", "apac", …) or aws-region-keyed entries
 	// ("us-gov-west-1") when Model is a canonical name. It must be empty
-	// for providers whose regional pricing lives elsewhere: OpenAI
-	// residency is [OpenAIUsage.DataResidency] and Anthropic geo is
-	// [ClaudeUsage.InferenceGeo].
+	// for providers that do not price by region: OpenAI residency is
+	// [OpenAIUsage.DataResidency], Anthropic geo is
+	// [ClaudeUsage.InferenceGeo], and Fireworks has no regional pricing at
+	// all.
 	Region string
 }
 
@@ -162,6 +180,11 @@ func (p Provider) owns(litellmProvider string) bool {
 	case ProviderVertexAI:
 		// vertex_ai, vertex_ai-anthropic_models, vertex_ai-openai_models, …
 		return strings.HasPrefix(litellmProvider, "vertex_ai")
+	case ProviderFireworks:
+		// Exact, not a prefix: fireworks_ai-embedding-models is a separate
+		// upstream provider for embedding endpoints, which this module does
+		// not price.
+		return litellmProvider == "fireworks_ai"
 	}
 	return false
 }
@@ -180,6 +203,13 @@ func (s ModelSelector) key() (string, bool) {
 			return "", false
 		}
 		return s.Model, true
+	case ProviderFireworks:
+		// The whole Fireworks model path is the key's suffix, slashes and
+		// all — there is no region segment to splice in.
+		if region != "" {
+			return "", false
+		}
+		return string(s.Provider) + "/" + s.Model, true
 	case ProviderAzure, ProviderAzureAI, ProviderVertexAI:
 		if region == "" {
 			return string(s.Provider) + "/" + s.Model, true
