@@ -12,6 +12,9 @@
 # fixable on the sync branch) but fails this job to raise the alarm.
 # Consumers' own resolution tests catch dropped models when they bump the
 # module version.
+#
+# Opening the PR depends on a repo/org Actions setting, not just on the
+# permissions block below — see the token note on the "open PR" step.
 name: sync-litellm
 
 on:
@@ -63,6 +66,17 @@ jobs:
         if: steps.fetch.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
+          # Explicit because this credential is the constraint, not an
+          # incidental default: GITHUB_TOKEN may open a PR only while the repo
+          # (or org) setting "Allow GitHub Actions to create and approve pull
+          # requests" is enabled. With it off, the API rejects creation *after*
+          # the branch has been force-pushed, stranding synced data on a
+          # PR-less branch — which is how every run of this workflow that had
+          # data to sync failed, from its introduction until 2026-08. Swapping
+          # in a GitHub App installation token lifts the requirement, and
+          # because App-created PRs do trigger workflows, it would also retire
+          # the draft/ready_for_review workaround below.
+          token: ${{ github.token }}
           # Draft so branch protection's required CI check can be satisfied:
           # a GITHUB_TOKEN-created PR can't trigger workflows, but marking the
           # draft "Ready for review" (a human action) runs ci.yml's ready_for_review
