@@ -60,6 +60,19 @@ const opus46Spec = `{
 	"litellm_provider": "anthropic"
 }`
 
+// deepseekV4FlashSpec mirrors
+// fireworks_ai/accounts/fireworks/models/deepseek-v4-flash: the Fireworks
+// shape — cache READS only (Fireworks' prompt cache is automatic and its
+// writes unbilled, so no upstream Fireworks entry carries a cache-creation
+// rate), no context-window tiers, no service-tier variants, no multipliers.
+// $0.14/M input, $0.028/M cache read, $0.28/M output.
+const deepseekV4FlashSpec = `{
+	"input_cost_per_token": 1.4e-07,
+	"cache_read_input_token_cost": 2.8e-08,
+	"output_cost_per_token": 2.8e-07,
+	"litellm_provider": "fireworks_ai"
+}`
+
 func mustParse(t *testing.T, spec string) Rates {
 	t.Helper()
 	return mustParseTiers(t, spec)[TierStandard]
@@ -329,6 +342,58 @@ func TestOpenAICacheWriteExceedsInputPanics(t *testing.T) {
 		}
 	}()
 	OpenAIUsage{InputTokens: 100, CachedInputTokens: 60, CacheWriteTokens: 50}.disjoint()
+}
+
+// TestFireworksNormalization encodes the Fireworks provider convention:
+// prompt_tokens INCLUDES the cached subset, exactly like OpenAI, and the
+// module — not the caller — splits it. 1,020,000 total input with 1,000,000
+// cached on deepseek-v4-flash rates: 20000×1.4e-7 + 1000000×2.8e-8 +
+// 5000×2.8e-7 = $0.0322 = exactly 3220 nls. Billing all 1,020,000 at the
+// input rate (double-counting the cache) would give 14420.
+func TestFireworksNormalization(t *testing.T) {
+	r := mustParse(t, deepseekV4FlashSpec)
+	got, ok := price(r, FireworksUsage{InputTokens: 1_020_000, CachedTokens: 1_000_000, OutputTokens: 5000})
+	if !ok || got != 3220 {
+		t.Fatalf("cost = %d, %v; want 3220, true", got, ok)
+	}
+	// The exported entry point must produce the same normalization from raw
+	// counts against the vendored entry these rates mirror.
+	const key = "fireworks_ai/accounts/fireworks/models/deepseek-v4-flash"
+	viaAPI, ok2 := Cost(key, FireworksUsage{InputTokens: 1_020_000, CachedTokens: 1_000_000, OutputTokens: 5000})
+	if !ok2 || viaAPI != got {
+		t.Fatalf("Cost(%s, FireworksUsage) = %d, %v; fixture = %d — vendored rates diverged from the fixture", key, viaAPI, ok2, got)
+	}
+}
+
+// TestFireworksSubCentRateIsExact is why routing Fireworks through this
+// module is worth anything: deepseek-v4-flash's $0.028/M cache read is finer
+// than a hundred-thousandth of a dollar per 1K tokens, the granularity
+// consumers' fixed-point rate tables commonly bottom out at. Parsed as an
+// exact rational it bills 2800 nls per million cached tokens; a table forced
+// to round it UP to $0.03/M — the safe direction, since rounding down
+// under-reports spend — bills 3000, over-reporting by 7.1%.
+func TestFireworksSubCentRateIsExact(t *testing.T) {
+	got, ok := price(mustParse(t, deepseekV4FlashSpec), FireworksUsage{InputTokens: 1_000_000, CachedTokens: 1_000_000})
+	if !ok || got != 2800 {
+		t.Fatalf("1M cached tokens = %d nls, %v; want exactly 2800 (rounding to $0.03/M would give 3000)", got, ok)
+	}
+}
+
+// TestFireworksNoCacheRateFails encodes the no-fallback rule on the models
+// that actually need it: several Fireworks entries (kimi-k2-thinking,
+// deepseek-v3p2 at the vendored commit) list input and output rates but no
+// cache_read_input_token_cost. A response reporting cached tokens on one of
+// those must fail to price rather than bill the cache at the uncached rate
+// or as free — the consumer falls back to its own table instead.
+func TestFireworksNoCacheRateFails(t *testing.T) {
+	r := mustParse(t, `{"input_cost_per_token": 6e-07, "output_cost_per_token": 2.5e-06, "litellm_provider": "fireworks_ai"}`)
+	if _, ok := price(r, FireworksUsage{InputTokens: 1000, CachedTokens: 1, OutputTokens: 10}); ok {
+		t.Fatal("cached tokens priced despite the model having no cache-read rate")
+	}
+	// The same response without cache activity prices normally.
+	if got, ok := price(r, FireworksUsage{InputTokens: 1000, OutputTokens: 10}); !ok || got != 63 {
+		t.Fatalf("uncached cost = %d, %v; want 63, true", got, ok)
+	}
 }
 
 // gpt55Spec models gpt-5.5's real standard/flex/priority rates (flex is
@@ -723,6 +788,31 @@ func TestVendoredDataCanaries(t *testing.T) {
 	if r, ok := RatesFor("gpt-5.4", TierStandard); !ok || r.RegionalUplift["eu"] == nil || r.RegionalUplift["us"] == nil {
 		t.Errorf("gpt-5.4 regional uplifts = %v; want eu and us factors", r.RegionalUplift)
 	}
+	// Fireworks canary: deepseek-v4-flash's exact published rates
+	// ($0.14/M in, $0.028/M cache read, $0.28/M out). Pinned exactly because
+	// the cache-read rate is the one a consumer's fixed-point table cannot
+	// represent — if a sync shifts it, the module's whole reason to price
+	// this model has moved.
+	if r, ok := RatesFor("fireworks_ai/accounts/fireworks/models/deepseek-v4-flash", TierStandard); !ok ||
+		r.Base.Input.Cmp(big.NewRat(14, 100_000_000)) != 0 ||
+		r.Base.CacheRead == nil || r.Base.CacheRead.Cmp(big.NewRat(28, 1_000_000_000)) != 0 ||
+		r.Base.Output.Cmp(big.NewRat(28, 100_000_000)) != 0 {
+		t.Errorf("deepseek-v4-flash rates = %+v; want $0.14/M in, $0.028/M cache read, $0.28/M out", r.Base)
+	}
+	// Absence canaries, the mirror of the presence ones above. Fireworks
+	// serves these as their own endpoints and LiteLLM does not price them at
+	// the vendored commit, so consumers must declare them locally
+	// (Config.Overrides). A sync that ADDS either one fails here — which is
+	// exactly when those local declarations must be retired before the two
+	// definitions silently diverge.
+	for _, model := range []string{
+		"fireworks_ai/accounts/fireworks/models/deepseek-v4-flash-0731",
+		"fireworks_ai/accounts/fireworks/models/kimi-k3",
+	} {
+		if _, ok := RatesFor(model, TierStandard); ok {
+			t.Errorf("%s is now in the vendored data — retire the consumer-side override that stands in for it", model)
+		}
+	}
 }
 
 // TestCostMatchesRatesFor encodes that the exported views never disagree:
@@ -756,6 +846,13 @@ func TestCostMatchesRatesFor(t *testing.T) {
 					gotOA, okOA := Cost(model, OpenAIUsage{InputTokens: c.input + c.cacheRead, CachedInputTokens: c.cacheRead, OutputTokens: c.output, ServiceTier: tier})
 					if gotOA != want || okOA != wantOK {
 						t.Errorf("%s/%s %+v: Cost(OpenAIUsage) = %d, %v; RatesFor math = %d, %v", model, tier, c, gotOA, okOA, want, wantOK)
+					}
+					// FireworksUsage has no tier field and always bills standard.
+					if tier == TierStandard {
+						gotFW, okFW := Cost(model, FireworksUsage{InputTokens: c.input + c.cacheRead, CachedTokens: c.cacheRead, OutputTokens: c.output})
+						if gotFW != want || okFW != wantOK {
+							t.Errorf("%s/%s %+v: Cost(FireworksUsage) = %d, %v; RatesFor math = %d, %v", model, tier, c, gotFW, okFW, want, wantOK)
+						}
 					}
 				}
 			}
@@ -830,6 +927,11 @@ func TestInvalidUsagePanics(t *testing.T) {
 	mustPanic("openai negative cached", func() { Cost("gpt-5", OpenAIUsage{CachedInputTokens: -1}) })
 	mustPanic("openai negative output", func() { Cost("gpt-5", OpenAIUsage{OutputTokens: -1}) })
 	mustPanic("openai cached exceeds input", func() { Cost("gpt-5", OpenAIUsage{InputTokens: 10, CachedInputTokens: 11}) })
+	const fw = "fireworks_ai/accounts/fireworks/models/deepseek-v4-flash"
+	mustPanic("fireworks negative input", func() { Cost(fw, FireworksUsage{InputTokens: -1}) })
+	mustPanic("fireworks negative cached", func() { Cost(fw, FireworksUsage{CachedTokens: -1}) })
+	mustPanic("fireworks negative output", func() { Cost(fw, FireworksUsage{OutputTokens: -1}) })
+	mustPanic("fireworks cached exceeds input", func() { Cost(fw, FireworksUsage{InputTokens: 10, CachedTokens: 11}) })
 	// Usage validation must not be masked by the model lookup: impossible
 	// counts panic even when the model is unknown.
 	mustPanic("unknown model, negative input", func() { Cost("no-such-model", ClaudeUsage{InputTokens: -1}) })

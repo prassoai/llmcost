@@ -8,10 +8,13 @@ centimill). Model ids are LiteLLM pricing keys, looked up directly.
 
 ## Usage — provider-explicit, raw counts in
 
-The two providers report token counts **differently**. `Cost` takes a sealed
-`Usage` interface implemented only by `ClaudeUsage` and `OpenAIUsage`; each
-takes its provider's RAW usage fields and normalizes to disjoint billable
-components inside. Never pre-subtract, never mix shapes.
+The providers report token counts **differently**. `Cost` takes a sealed
+`Usage` interface implemented only by `ClaudeUsage`, `OpenAIUsage`, and
+`FireworksUsage`; each takes its provider's RAW usage fields and normalizes
+to disjoint billable components inside, and carries exactly the pricing modes
+that provider actually has — a mode a provider doesn't offer is
+*inexpressible*, not merely unpriceable. Never pre-subtract, never mix
+shapes.
 
 **Anthropic** (disjoint counts — `input_tokens` EXCLUDES cache activity):
 
@@ -40,6 +43,17 @@ cost, ok := llmcost.Cost("gpt-5.6-sol", llmcost.OpenAIUsage{
 })
 ```
 
+**Fireworks AI** (OpenAI-compatible, so also overlapping — but no cache
+writes, no tiers, no regional pricing, so the type has three fields):
+
+```go
+cost, ok := llmcost.Cost("fireworks_ai/accounts/fireworks/models/deepseek-v4-flash", llmcost.FireworksUsage{
+    InputTokens:  1020000, // usage.prompt_tokens — total (1000000 cached + 20000 uncached)
+    CachedTokens: 1000000, // prompt_tokens_details.cached_tokens — cache-read subset
+    OutputTokens: 5000,    // usage.completion_tokens
+})
+```
+
 `ok` is false whenever the response can't be priced — unknown model, or usage
 on a component the model has no rate for. Nothing silently bills zero.
 
@@ -48,8 +62,8 @@ on a component the model has no rate for. Nothing silently bills zero.
 OpenAI bills the same request differently by processing tier: **flex**
 (cheaper, slower) and **priority** (pricier, faster) publish their own rates
 (LiteLLM's `*_flex` / `*_priority` variants). The tier rides on
-`OpenAIUsage.ServiceTier` (zero value = standard) — Claude usage has no tier
-knob.
+`OpenAIUsage.ServiceTier` (zero value = standard) — Claude and Fireworks
+usage have no tier knob, because neither provider publishes tiered rates.
 
 ```go
 cost, ok := llmcost.Cost("gpt-5.5", llmcost.OpenAIUsage{
@@ -78,8 +92,10 @@ modeled.
   remainder at `cache_creation_input_token_cost` (1.25× input) — the 1h rate
   participates in context-window tiers too. OpenAI has a single cache-write
   TTL: GPT-5.6+ bill `CacheWriteTokens` at `cache_creation_input_token_cost`
-  (1.25× input); pre-5.6 models bill reads only. A model missing a rate for a
-  reported component *fails* to price — never approximated at another rate.
+  (1.25× input); pre-5.6 models bill reads only. Fireworks bills reads only
+  always — its prompt cache is automatic and unbilled, so `FireworksUsage`
+  has no cache-write field. A model missing a rate for a reported component
+  *fails* to price — never approximated at another rate.
 - **Context-window tiers.** Models with LiteLLM `*_above_Xk_tokens` pricing
   (Anthropic's 1M-context beta >200k, GPT-5.4/5.5 >272k, Gemini >200k) are
   tiered on the request's **total prompt size** (uncached + cache reads +
@@ -96,7 +112,9 @@ modeled.
   to 6×, so billing standard rates on a data lag is a silent 6× underbill.
   OpenAI's data residency (`eu.`/`us.api.openai.com`) uplifts **every**
   component including cache reads (×1.1 on gpt-5.4/5.5); models OpenAI
-  doesn't regionally price bill standard, as in LiteLLM. Multipliers scale
+  doesn't regionally price bill standard, as in LiteLLM. Fireworks has
+  neither mode — it publishes no multipliers and no regional uplifts, so
+  `FireworksUsage` has no mode fields. Multipliers scale
   the rates of whichever service tier is being priced.
 - **Exact math, ceiling at the total.** Rates parse from decimal literals
   into `math/big.Rat` — never through float64. The response is priced exactly
@@ -116,9 +134,14 @@ modeled.
   `us.anthropic.claude-sonnet-4-5-20250929-v1:0`. Resolution is
   **deterministic and verified** — an ambiguous undated name fails, a
   missing region key fails (never the cheaper global key), a cross-provider
-  key fails — and `TestSelectorCanonicalCoverage` gates every data sync on
+  key fails. Canonical names exist only for providers that *rename* what they
+  serve; **Fireworks** doesn't, so its keys are `fireworks_ai/` plus your own
+  model path verbatim (`{Fireworks, "accounts/fireworks/models/deepseek-v4-flash"}`)
+  and resolve by native id alone.
+  `TestSelectorCanonicalCoverage` gates every data sync on
   the whole scheme: each cloud-served Anthropic/OpenAI key must stay
-  selectable by its vendor name. Which selectors you bill is your policy:
+  selectable by its vendor name, and every Fireworks key by its model path.
+  Which selectors you bill is your policy:
   test that each resolves — that test is your guarantee that a data sync
   can't silently drop a model you depend on.
 
