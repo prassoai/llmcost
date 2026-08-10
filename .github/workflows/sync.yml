@@ -12,6 +12,9 @@
 # fixable on the sync branch) but fails this job to raise the alarm.
 # Consumers' own resolution tests catch dropped models when they bump the
 # module version.
+#
+# Opening the PR depends on a repo/org Actions setting, not just on the
+# permissions block below — see the token note on the "open PR" step.
 name: sync-litellm
 
 on:
@@ -27,7 +30,7 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Fetched via the authenticated API, not raw.githubusercontent.com —
       # anonymous fetches get 429-rate-limited from shared runner IPs.
       - name: fetch upstream at pinned-to-be commit
@@ -50,7 +53,7 @@ jobs:
             cp /tmp/upstream.json model_prices_and_context_window.json
             sed -i "s/^commit: .*/commit: ${sha}/" VENDORED_FROM
           fi
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         if: steps.fetch.outputs.changed == 'true'
         with:
           go-version-file: go.mod
@@ -61,8 +64,19 @@ jobs:
         run: go test ./...
       - name: open PR
         if: steps.fetch.outputs.changed == 'true'
-        uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676 # v7
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
+          # Explicit because this credential is the constraint, not an
+          # incidental default: GITHUB_TOKEN may open a PR only while the repo
+          # (or org) setting "Allow GitHub Actions to create and approve pull
+          # requests" is enabled. With it off, the API rejects creation *after*
+          # the branch has been force-pushed, stranding synced data on a
+          # PR-less branch — which is how every run of this workflow that had
+          # data to sync failed, from its introduction until 2026-08. Swapping
+          # in a GitHub App installation token lifts the requirement, and
+          # because App-created PRs do trigger workflows, it would also retire
+          # the draft/ready_for_review workaround below.
+          token: ${{ github.token }}
           # Draft so branch protection's required CI check can be satisfied:
           # a GITHUB_TOKEN-created PR can't trigger workflows, but marking the
           # draft "Ready for review" (a human action) runs ci.yml's ready_for_review
