@@ -8,11 +8,13 @@
 //
 // # Provider-explicit usage — the part callers must not get wrong
 //
-// The two providers report token counts DIFFERENTLY, so [Cost] takes a
-// sealed [Usage] interface implemented only by [ClaudeUsage] and
-// [OpenAIUsage]. Each provider type takes that provider's RAW reported
-// counts and normalizes them into disjoint billable components internally.
-// Never wrap one provider's counts in the other's type, and never
+// The providers report token counts DIFFERENTLY, so [Cost] takes a sealed
+// [Usage] interface implemented only by [ClaudeUsage], [OpenAIUsage], and
+// [FireworksUsage]. Each provider type takes that provider's RAW reported
+// counts and normalizes them into disjoint billable components internally,
+// and carries exactly the pricing modes that provider actually has — so a
+// mode a provider does not offer is inexpressible, not merely unpriceable.
+// Never wrap one provider's counts in another's type, and never
 // pre-subtract.
 //
 // Anthropic reports disjoint counts — input_tokens EXCLUDES cache activity:
@@ -39,6 +41,16 @@
 //		ServiceTier:       tier,                // "" = standard; TierFlex / TierPriority bill the tier's own rates
 //	})
 //
+// Fireworks serves an OpenAI-compatible API and likewise reports overlapping
+// counts, but has no cache writes, no service tiers, and no regional
+// pricing — so the type has three fields and nothing else:
+//
+//	llmcost.Cost("fireworks_ai/accounts/fireworks/models/deepseek-v4-flash", llmcost.FireworksUsage{
+//		InputTokens:  u.PromptTokens,                     // total input, cached included
+//		CachedTokens: u.PromptTokensDetails.CachedTokens, // the cache-read subset of InputTokens
+//		OutputTokens: u.CompletionTokens,
+//	})
+//
 // Cost returns (Nls, bool): ok=false whenever the response cannot be priced —
 // unknown model, unpriced model, usage on a component the model has no rate
 // for, or a mode (fast, pinned geo) the model has no multiplier for. Nothing
@@ -53,7 +65,8 @@
 // per-token rates, carried in LiteLLM's data as *_flex and *_priority field
 // variants. The tier rides on [OpenAIUsage.ServiceTier] — zero value
 // standard — so every provider-specific pricing input lives on its
-// provider's usage type and a flex Claude request is inexpressible;
+// provider's usage type and a flex Claude or Fireworks request is
+// inexpressible (neither provider publishes tiered rates);
 // [RatesFor] takes the [ServiceTier] explicitly (a raw lookup with no
 // usage in hand).
 //
@@ -79,7 +92,11 @@
 // remainder at cache_creation_input_token_cost (1.25× input). OpenAI has a
 // single cache-write TTL: GPT-5.6+ bill OpenAIUsage.CacheWriteTokens at
 // cache_creation_input_token_cost (1.25× input) with no 1-hour split, and
-// pre-5.6 models bill reads only. These are the providers' real rates, and
+// pre-5.6 models bill reads only. Fireworks bills reads only in every case —
+// its prompt cache is automatic and its writes unbilled, so
+// [FireworksUsage] has no cache-write field at all; several Fireworks models
+// carry no cache-read rate either, and a response reporting cached tokens on
+// one of those fails to price. These are the providers' real rates, and
 // there is deliberately
 // NO fallback in any direction: a model without a rate for a component —
 // including a 5m-only model handed 1h writes — fails to price usage that
@@ -123,6 +140,10 @@
 // prices — so a model without an uplift for the region bills at standard
 // rates rather than failing, matching LiteLLM.
 //
+// Fireworks has neither mode: it publishes no provider_specific_entry
+// multipliers and no regional uplifts, so [FireworksUsage] carries no mode
+// fields and every Fireworks response bills the model's listed rates.
+//
 // Multipliers scale the tier-resolved rates; tier selection itself is a
 // pure function of token counts.
 //
@@ -147,7 +168,9 @@
 // Bedrock — and each is its own table entry.
 //
 // [ModelSelector] owns the key GRAMMAR for Anthropic and OpenAI models
-// across direct, Bedrock, Vertex, Azure OpenAI, and Azure AI Foundry.
+// across direct, Bedrock, Vertex, Azure OpenAI, and Azure AI Foundry, plus
+// Fireworks AI — which serves other vendors' open-weight models entirely
+// (DeepSeek, Moonshot, MiniMax, Zhipu, Qwen).
 // Key() resolves the provider's NATIVE id verbatim, or the VENDOR's
 // canonical model name through the cloud's bespoke renaming scheme —
 // Bedrock's vendor prefixes, artifact versions (-v1:0), geo profiles and
@@ -159,9 +182,12 @@
 // ambiguous across several dated variants fails), never falling back (a
 // missing Azure region key fails rather than billing the cheaper global
 // key), and never crossing providers (the resolved entry's own
-// litellm_provider must match). TestSelectorCanonicalCoverage gates every
-// data sync on the whole scheme: each cloud-served Anthropic/OpenAI key
-// must remain selectable by its vendor name. This module still owns no
+// litellm_provider must match). Canonical names exist only for providers
+// that RENAME what they serve; Fireworks does not, so its keys carry the
+// caller's own model path verbatim and resolve by native id alone.
+// TestSelectorCanonicalCoverage gates every data sync on the whole scheme:
+// each cloud-served Anthropic/OpenAI key must remain selectable by its
+// vendor name, and every Fireworks key by its model path. This module still owns no
 // fuzzy alias layer: WHICH selectors a consumer bills is the consumer's
 // policy, and the consumer should test that each of its selectors resolves
 // — that test is the guarantee that a data sync can't silently drop a model

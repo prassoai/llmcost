@@ -30,6 +30,12 @@ func TestSelectorKeyGrammar(t *testing.T) {
 		{ModelSelector{ProviderBedrock, "openai.gpt-oss-120b-1:0", ""}, "openai.gpt-oss-120b-1:0"},
 		{ModelSelector{ProviderVertexAI, "claude-sonnet-4-5", ""}, "vertex_ai/claude-sonnet-4-5"},
 		{ModelSelector{ProviderVertexAI, "claude-sonnet-4-5@20250929", ""}, "vertex_ai/claude-sonnet-4-5@20250929"},
+		// Fireworks: the model path is the key's suffix, slashes and all —
+		// deployment path, router path, and the bare short name upstream
+		// lists some models under, each verbatim.
+		{ModelSelector{ProviderFireworks, "accounts/fireworks/models/deepseek-v4-flash", ""}, "fireworks_ai/accounts/fireworks/models/deepseek-v4-flash"},
+		{ModelSelector{ProviderFireworks, "accounts/fireworks/routers/kimi-k2p6-fast", ""}, "fireworks_ai/accounts/fireworks/routers/kimi-k2p6-fast"},
+		{ModelSelector{ProviderFireworks, "deepseek-v4-flash", ""}, "fireworks_ai/deepseek-v4-flash"},
 	} {
 		got, ok := tc.sel.Key()
 		if !ok || got != tc.want {
@@ -125,6 +131,19 @@ func TestSelectorNeverGuesses(t *testing.T) {
 		"bedrock id through anthropic":        {ProviderAnthropic, "anthropic.claude-sonnet-4-5-20250929-v1:0", ""},
 		"cross-vendor: claude through openai": {ProviderOpenAI, "claude-sonnet-4-5", ""},
 		"cross-vendor: gpt through anthropic": {ProviderAnthropic, "gpt-5.4", ""},
+		// Fireworks: no region (it has no regional pricing at all), no
+		// canonical-name fallback (it renames nothing, so the accounts path
+		// is NOT reachable by the vendor's own model name), and the
+		// ownership check still holds in both directions.
+		"region on fireworks (no regional pricing)": {ProviderFireworks, "accounts/fireworks/models/deepseek-v4-flash", "us"},
+		"fireworks prefix smuggled into Model":      {ProviderFireworks, "fireworks_ai/accounts/fireworks/models/deepseek-v4-flash", ""},
+		"vendor name for a fireworks accounts path": {ProviderFireworks, "DeepSeek-V4-Flash", ""},
+		"cross-vendor: gpt through fireworks":       {ProviderFireworks, "gpt-5.4", ""},
+		"fireworks path through openai":             {ProviderOpenAI, "accounts/fireworks/models/deepseek-v4-flash", ""},
+		// Embedding endpoints are a separate upstream provider
+		// (fireworks_ai-embedding-models) this module does not price; the
+		// exact-match ownership check must not let them through.
+		"fireworks embedding entry": {ProviderFireworks, "nomic-ai/nomic-embed-text-v1.5", ""},
 	} {
 		if key, ok := sel.Key(); ok {
 			t.Errorf("%s: %+v resolved to %q; want ok=false", name, sel, key)
@@ -150,16 +169,38 @@ func TestSelectorNeverGuesses(t *testing.T) {
 //     gpt-3.5 spellings, Bedrock's dual bedrock/-prefixed ids) must stay
 //     reachable via its native id.
 //
-// Direct OpenAI/Anthropic keys must resolve natively. The guarantee is
-// scoped to the Anthropic/OpenAI vocabulary (claude|gpt keys) — other
-// vendors hosted on the same clouds are outside the selector's contract.
-// Per-provider floors keep the gate honest: a filter regression that
-// silently skips a family fails loudly.
+// Direct OpenAI/Anthropic keys must resolve natively. For the CLOUDS the
+// guarantee is scoped to the Anthropic/OpenAI vocabulary (claude|gpt keys)
+// — other vendors hosted on the same clouds are outside the selector's
+// contract. Fireworks is the exception and is checked in full: it exists in
+// this module to price other vendors' models, so scoping it to claude|gpt
+// would gate almost nothing. Per-provider floors keep the gate honest: a
+// filter regression that silently skips a family fails loudly.
 func TestSelectorCanonicalCoverage(t *testing.T) {
 	vendorModel := regexp.MustCompile(`claude|gpt`)
 	counts := map[Provider]int{}
 	for key, tiers := range table() {
 		r := tiers[TierStandard] // standard anchors membership: present for every entry
+		// Fireworks is the one provider whose contract is NOT scoped to the
+		// Anthropic/OpenAI vocabulary — it serves other vendors' open-weight
+		// models entirely (DeepSeek, Moonshot, MiniMax, Zhipu, Qwen), so every
+		// key it bills is in scope. It renames nothing, so the guarantee is
+		// native reachability rather than canonical round-tripping.
+		if ProviderFireworks.owns(r.litellmProvider) {
+			path, prefixed := strings.CutPrefix(key, "fireworks_ai/")
+			if !prefixed {
+				// LiteLLM's unprefixed fireworks-ai-{default,up-to-4b,
+				// moe-up-to-56b,…} keys are per-parameter-count pricing
+				// buckets for on-demand deployments, not models: there is no
+				// model path to select them by. Unreachable by design.
+				continue
+			}
+			counts[ProviderFireworks]++
+			if got, ok := (ModelSelector{ProviderFireworks, path, ""}).Key(); !ok || got != key {
+				t.Errorf("%s: fireworks key not natively reachable via model path %q — Key = %q, %v", key, path, got, ok)
+			}
+			continue
+		}
 		if !vendorModel.MatchString(key) {
 			continue
 		}
@@ -208,6 +249,7 @@ func TestSelectorCanonicalCoverage(t *testing.T) {
 	for p, floor := range map[Provider]int{
 		ProviderOpenAI: 100, ProviderAnthropic: 20, ProviderBedrock: 80,
 		ProviderVertexAI: 30, ProviderAzure: 100, ProviderAzureAI: 15,
+		ProviderFireworks: 250,
 	} {
 		if counts[p] < floor {
 			t.Errorf("%s: coverage gate checked only %d keys (floor %d) — the classification has regressed", p, counts[p], floor)
