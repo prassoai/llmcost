@@ -1,0 +1,16 @@
+# Keep the SHA-pinned actions in .github/workflows current. Pinning by SHA is
+# deliberate (a mutable tag is a supply-chain hole) but the pins then rot
+# invisibly until the runner deprecates something out from under them — which
+# is how all three actions ended up on the deprecated Node 20 runtime. One
+# grouped PR a week keeps the pins moving without weekly noise.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:11" # off the :00 stampede, after the 06:43 pricing sync
+    groups:
+      actions:
+        patterns: ["*"]
