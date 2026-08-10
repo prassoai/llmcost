@@ -5,16 +5,15 @@
 # VENDORED_FROM pin, and opens a PR.
 #
 # The validation gate — go test: schema parse, table invariants, and data
-# canaries (LiteLLM has shipped a broken cost map before) — runs twice: once
-# here, because PRs opened with GITHUB_TOKEN do not trigger the ci workflow
-# automatically, and again in CI whenever a human pushes to or reopens the
-# PR. A gate failure still opens the PR (so the breakage is visible and
-# fixable on the sync branch) but fails this job to raise the alarm.
-# Consumers' own resolution tests catch dropped models when they bump the
-# module version.
+# canaries (LiteLLM has shipped a broken cost map before) — runs here so its
+# outcome lands in the PR body and a failure alarms this run; ci.yml runs it
+# again on the PR itself. A gate failure still opens the PR (so the breakage
+# is visible and fixable on the sync branch) but fails this job to raise the
+# alarm. Consumers' own resolution tests catch dropped models when they bump
+# the module version.
 #
-# Opening the PR depends on a repo/org Actions setting, not just on the
-# permissions block below — see the token note on the "open PR" step.
+# Opening the PR needs the SYNC_PR_TOKEN repo secret, not just the permissions
+# block below — see the token note on the "open PR" step.
 name: sync-litellm
 
 on:
@@ -66,21 +65,32 @@ jobs:
         if: steps.fetch.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
-          # Explicit because this credential is the constraint, not an
-          # incidental default: GITHUB_TOKEN may open a PR only while the repo
-          # (or org) setting "Allow GitHub Actions to create and approve pull
-          # requests" is enabled. With it off, the API rejects creation *after*
-          # the branch has been force-pushed, stranding synced data on a
-          # PR-less branch — which is how every run of this workflow that had
-          # data to sync failed, from its introduction until 2026-08. Swapping
-          # in a GitHub App installation token lifts the requirement, and
-          # because App-created PRs do trigger workflows, it would also retire
-          # the draft/ready_for_review workaround below.
-          token: ${{ github.token }}
-          # Draft so branch protection's required CI check can be satisfied:
-          # a GITHUB_TOKEN-created PR can't trigger workflows, but marking the
-          # draft "Ready for review" (a human action) runs ci.yml's ready_for_review
-          # trigger. always-true keeps it draft across weekly re-syncs, forcing re-review.
+          # Deliberately NOT github.token: the org forbids Actions' default
+          # GITHUB_TOKEN from creating pull requests ("Allow GitHub Actions to
+          # create and approve pull requests" is off org-wide and locked at the
+          # repo), so the API rejects creation *after* the branch has been
+          # force-pushed, stranding synced data on a PR-less branch — how every
+          # run of this workflow that had data to sync failed, from its
+          # introduction until 2026-08.
+          #
+          # SYNC_PR_TOKEN is a repo secret holding a fine-grained PAT with
+          # `Pull requests: write` and `Contents: write` on this repo; that
+          # credential is not subject to the Actions policy. It must be
+          # long-lived, because a secret is a static value read weeks apart by
+          # a weekly cron: a GitHub App *installation* token expires an hour
+          # after minting, so storing one here would authenticate once and
+          # 401 on every run after that. To use an App instead, mint the
+          # installation token in this job (actions/create-github-app-token,
+          # from App id + private key secrets) and pass that step's output —
+          # never park an installation token in a secret.
+          #
+          # Passed explicitly and never defaulted: if the secret is missing the
+          # step fails here rather than silently falling back to a credential
+          # that cannot open the PR.
+          token: ${{ secrets.SYNC_PR_TOKEN }}
+          # Draft so vendored upstream data cannot be merged unreviewed —
+          # marking it "Ready for review" is the human gate. always-true keeps
+          # it draft across weekly re-syncs, forcing re-review each time.
           draft: always-true
           branch: sync/litellm-prices
           commit-message: "Sync LiteLLM pricing data to BerriAI/litellm@${{ steps.fetch.outputs.sha }}"
