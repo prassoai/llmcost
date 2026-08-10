@@ -73,12 +73,20 @@ jobs:
           # run of this workflow that had data to sync failed, from its
           # introduction until 2026-08.
           #
-          # SYNC_PR_TOKEN is a repo secret holding a GitHub App installation
-          # token or a fine-grained PAT with `Pull requests: write` and
-          # `Contents: write` on this repo; that credential is not subject to
-          # the Actions policy. Passed explicitly and never defaulted: if the
-          # secret is missing the step fails here rather than silently falling
-          # back to a credential that cannot open the PR.
+          # SYNC_PR_TOKEN is a repo secret holding a fine-grained PAT with
+          # `Pull requests: write` and `Contents: write` on this repo; that
+          # credential is not subject to the Actions policy. It must be
+          # long-lived, because a secret is a static value read weeks apart by
+          # a weekly cron: a GitHub App *installation* token expires an hour
+          # after minting, so storing one here would authenticate once and
+          # 401 on every run after that. To use an App instead, mint the
+          # installation token in this job (actions/create-github-app-token,
+          # from App id + private key secrets) and pass that step's output —
+          # never park an installation token in a secret.
+          #
+          # Passed explicitly and never defaulted: if the secret is missing the
+          # step fails here rather than silently falling back to a credential
+          # that cannot open the PR.
           token: ${{ secrets.SYNC_PR_TOKEN }}
           # Draft so vendored upstream data cannot be merged unreviewed —
           # marking it "Ready for review" is the human gate. always-true keeps

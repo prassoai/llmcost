@@ -162,9 +162,12 @@ restructures the pricing schema or drops the canary models' pricing
 (LiteLLM has shipped a broken cost map before). Consumers' own resolution
 tests catch dropped models when they bump the module version.
 
-Opening that PR requires the repo secret `SYNC_PR_TOKEN` — a GitHub App
-installation token or a fine-grained PAT with `Pull requests: write` and
-`Contents: write` on this repo. Actions' default `GITHUB_TOKEN` cannot be
+Opening that PR requires the repo secret `SYNC_PR_TOKEN` — a fine-grained PAT
+with `Pull requests: write` and `Contents: write` on this repo. It has to be
+long-lived: the secret is read by a weekly cron, so a GitHub App *installation*
+token (valid one hour) would 401 on every run after the first. Prefer an App?
+Mint the installation token inside the job with `actions/create-github-app-token`
+and pass its output. Actions' default `GITHUB_TOKEN` cannot be
 used: the org disallows GitHub Actions from creating pull requests, and the
 API rejects creation only *after* the sync branch is pushed, stranding the
 synced data on a branch with no PR. Without the secret, the sync workflow
