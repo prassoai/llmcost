@@ -28,6 +28,9 @@ func TestSelectorKeyGrammar(t *testing.T) {
 		{ModelSelector{ProviderBedrock, "anthropic.claude-sonnet-4-5-20250929-v1:0", ""}, "anthropic.claude-sonnet-4-5-20250929-v1:0"},
 		{ModelSelector{ProviderBedrock, "us.anthropic.claude-sonnet-4-5-20250929-v1:0", ""}, "us.anthropic.claude-sonnet-4-5-20250929-v1:0"},
 		{ModelSelector{ProviderBedrock, "openai.gpt-oss-120b-1:0", ""}, "openai.gpt-oss-120b-1:0"},
+		// Bedrock mantle: the native Bedrock model id resolves via the
+		// bedrock_mantle/ prefix fallback in nativeKey.
+		{ModelSelector{ProviderBedrock, "openai.gpt-5.4", ""}, "bedrock_mantle/openai.gpt-5.4"},
 		{ModelSelector{ProviderVertexAI, "claude-sonnet-4-5", ""}, "vertex_ai/claude-sonnet-4-5"},
 		{ModelSelector{ProviderVertexAI, "claude-sonnet-4-5@20250929", ""}, "vertex_ai/claude-sonnet-4-5@20250929"},
 		// Fireworks: the model path is the key's suffix, slashes and all —
@@ -78,6 +81,13 @@ func TestSelectorCanonicalNames(t *testing.T) {
 		{ModelSelector{ProviderBedrock, "claude-sonnet-4-5-20250929", "us-gov-west-1"}, "bedrock/us-gov-west-1/anthropic.claude-sonnet-4-5-20250929-v1:0"},
 		// OpenAI-on-Bedrock versionless artifact suffix.
 		{ModelSelector{ProviderBedrock, "gpt-oss-120b", ""}, "openai.gpt-oss-120b-1:0"},
+		// OpenAI-on-Bedrock mantle (Responses endpoint): canonical vendor
+		// name does NOT resolve for bedrock_mantle — the entries are excluded
+		// from the canonical index to avoid rate conflicts with regular
+		// bedrock_converse entries (gpt-oss models). Callers that have a
+		// canonical name should try the provider-native id ("openai.gpt-5.4")
+		// which resolves via nativeKey's prefix fallback (tested in
+		// TestSelectorKeyGrammar above).
 		// Legacy Claude 1/2: vN is the MODEL version and is part of the name.
 		{ModelSelector{ProviderBedrock, "claude-v2:1", ""}, "anthropic.claude-v2:1"},
 		// Vertex: @date form.
@@ -120,10 +130,10 @@ func TestSelectorNeverGuesses(t *testing.T) {
 		"region on openai (residency is usage-side)":                   {ProviderOpenAI, "gpt-5.4", "eu"},
 		"region on anthropic (geo is usage-side)":                      {ProviderAnthropic, "claude-sonnet-4-5", "us"},
 		"region composes with canonical names, not native bedrock ids": {ProviderBedrock, "anthropic.claude-sonnet-4-5-20250929-v1:0", "us"},
-		"unknown provider":                      {Provider("gemini"), "gemini-2.5-pro", ""},
-		"empty model":                           {ProviderOpenAI, "", ""},
-		"direct id through the wrong provider":  {ProviderVertexAI, "gpt-5.4", ""},
-		"canonical name the cloud never serves": {ProviderBedrock, "gpt-5.4", ""},
+		"unknown provider":                                          {Provider("gemini"), "gemini-2.5-pro", ""},
+		"empty model":                                               {ProviderOpenAI, "", ""},
+		"direct id through the wrong provider":                      {ProviderVertexAI, "gpt-5.4", ""},
+		"canonical name for a bedrock_mantle-only model (use native id)": {ProviderBedrock, "gpt-5.4", ""},
 		// The provider-ownership check: keys that CONSTRUCT and RESOLVE, but
 		// to an entry billed by a different provider, must fail — never
 		// silently bill that provider's rates.
@@ -219,6 +229,22 @@ func TestSelectorCanonicalCoverage(t *testing.T) {
 			ProviderAzure.owns(r.litellmProvider) || ProviderAzureAI.owns(r.litellmProvider)
 		c, ok := canonicalize(key, r.litellmProvider)
 		if !ok {
+			if r.litellmProvider == "bedrock_mantle" {
+				// bedrock_mantle entries are excluded from canonical-name
+				// resolution (rate conflicts with bedrock_converse for
+				// shared models). Check native-id reachability: the bare
+				// native id resolves when no bedrock_converse twin shadows
+				// it; otherwise the full "bedrock_mantle/..." key resolves.
+				nativeID := strings.TrimPrefix(key, "bedrock_mantle/")
+				counts[ProviderBedrock]++
+				if got, ok := (ModelSelector{ProviderBedrock, nativeID, ""}).Key(); ok && got == key {
+					continue
+				}
+				if got, ok := (ModelSelector{ProviderBedrock, key, ""}).Key(); !ok || got != key {
+					t.Errorf("%s: bedrock_mantle key not reachable via native id %q or full key — Key = %q, %v", key, nativeID, got, ok)
+				}
+				continue
+			}
 			if cloud {
 				t.Errorf("%s (litellm_provider %s): cloud key outside the canonicalization scheme — new upstream naming form?", key, r.litellmProvider)
 			}
