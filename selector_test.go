@@ -130,9 +130,9 @@ func TestSelectorNeverGuesses(t *testing.T) {
 		"region on openai (residency is usage-side)":                   {ProviderOpenAI, "gpt-5.4", "eu"},
 		"region on anthropic (geo is usage-side)":                      {ProviderAnthropic, "claude-sonnet-4-5", "us"},
 		"region composes with canonical names, not native bedrock ids": {ProviderBedrock, "anthropic.claude-sonnet-4-5-20250929-v1:0", "us"},
-		"unknown provider":                                          {Provider("gemini"), "gemini-2.5-pro", ""},
-		"empty model":                                               {ProviderOpenAI, "", ""},
-		"direct id through the wrong provider":                      {ProviderVertexAI, "gpt-5.4", ""},
+		"unknown provider":                     {Provider("gemini"), "gemini-2.5-pro", ""},
+		"empty model":                          {ProviderOpenAI, "", ""},
+		"direct id through the wrong provider": {ProviderVertexAI, "gpt-5.4", ""},
 		"canonical name for a bedrock_mantle-only model (use native id)": {ProviderBedrock, "gpt-5.4", ""},
 		// The provider-ownership check: keys that CONSTRUCT and RESOLVE, but
 		// to an entry billed by a different provider, must fail — never
