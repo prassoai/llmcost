@@ -307,12 +307,11 @@ func canonicalize(key, litellmProvider string) (canonicalization, bool) {
 			// bedrock_mantle/{id}: OpenAI-on-Bedrock via the Responses
 			// endpoint. These entries carry a mantle pricing premium and
 			// overlap with regular bedrock_converse entries for some models
-			// (gpt-oss) at different rates. They are excluded from canonical-
-			// name resolution and reachable only via nativeKey's prefix
-			// fallback. Callers that have a canonical vendor name (e.g.
-			// "gpt-5.4") should try the selector with the vendor name first
-			// (nativeKey fails), then with the provider-native id
-			// ("openai.gpt-5.4", nativeKey prefix fallback succeeds).
+			// at different rates — specifically gpt-oss-20b (input differs)
+			// and gpt-oss-safeguard-20b (input and output both differ).
+			// Admitting them to canonical-name resolution would make those
+			// names ambiguous between two entries that price differently.
+			// Excluded; reachable only via nativeKey's prefix fallback.
 			return canonicalization{}, false
 		}
 		m := bedrockID.FindStringSubmatch(id)
