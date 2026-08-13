@@ -144,11 +144,19 @@ func (s ModelSelector) nativeKey() (string, bool) {
 	if !ok {
 		return "", false
 	}
-	r, ok := table()[key][TierStandard] // standard anchors membership: present for every table entry
-	if !ok || !s.Provider.owns(r.litellmProvider) {
-		return "", false
+	if r, ok := table()[key][TierStandard]; ok && s.Provider.owns(r.litellmProvider) {
+		return key, true
 	}
-	return key, true
+	// Bedrock mantle entries (OpenAI-on-Bedrock via the Responses endpoint)
+	// are keyed as "bedrock_mantle/{native_id}" in the LiteLLM snapshot, not
+	// the bare native id. Try the prefixed key when the bare one misses.
+	if s.Provider == ProviderBedrock {
+		mk := "bedrock_mantle/" + key
+		if r, ok := table()[mk][TierStandard]; ok && s.Provider.owns(r.litellmProvider) {
+			return mk, true
+		}
+	}
+	return "", false
 }
 
 // isDatedVariantOf reports whether name is base plus an 8-digit date suffix
@@ -176,7 +184,7 @@ func (p Provider) owns(litellmProvider string) bool {
 	case ProviderAzureAI:
 		return litellmProvider == "azure_ai"
 	case ProviderBedrock:
-		return litellmProvider == "bedrock" || litellmProvider == "bedrock_converse"
+		return litellmProvider == "bedrock" || litellmProvider == "bedrock_converse" || litellmProvider == "bedrock_mantle"
 	case ProviderVertexAI:
 		// vertex_ai, vertex_ai-anthropic_models, vertex_ai-openai_models, …
 		return strings.HasPrefix(litellmProvider, "vertex_ai")
@@ -295,6 +303,16 @@ func canonicalize(key, litellmProvider string) (canonicalization, bool) {
 			} else {
 				id = rest
 			}
+		} else if strings.HasPrefix(id, "bedrock_mantle/") {
+			// bedrock_mantle/{id}: OpenAI-on-Bedrock via the Responses
+			// endpoint. These entries carry a mantle pricing premium and
+			// overlap with regular bedrock_converse entries for some models
+			// at different rates — specifically gpt-oss-20b (input differs)
+			// and gpt-oss-safeguard-20b (input and output both differ).
+			// Admitting them to canonical-name resolution would make those
+			// names ambiguous between two entries that price differently.
+			// Excluded; reachable only via nativeKey's prefix fallback.
+			return canonicalization{}, false
 		}
 		m := bedrockID.FindStringSubmatch(id)
 		name, prio := id, 2 // vendorless oddities lose to real AWS ids
