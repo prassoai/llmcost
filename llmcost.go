@@ -543,8 +543,93 @@ var table = sync.OnceValue(func() map[string]map[ServiceTier]Rates {
 			models[model] = m
 		}
 	}
+	backfillAzureRates(models)
 	return models
 })
+
+// backfillAzureRates fills nil per-token rate fields in Azure OpenAI entries
+// from their direct-API OpenAI twins. LiteLLM's vendored data systematically
+// lists Azure entries with null cache_creation_input_token_cost (and
+// occasionally other cache-rate fields) while the OpenAI twin has them
+// populated — Azure OpenAI charges the same cache-write rates as OpenAI
+// direct, so the nulls are an upstream data gap, not a pricing difference.
+//
+// The fallback strips the "azure/" prefix and any data-zone segment ("us/",
+// "eu/") to find the bare OpenAI key and inherits nil rate fields from it —
+// base rates AND context-window tier rates, at every service tier the Azure
+// entry defines. This lives in code so the fix survives re-vendoring without
+// hand-editing the JSON.
+func backfillAzureRates(models map[string]map[ServiceTier]Rates) {
+	for key, tiers := range models {
+		if !ProviderAzure.owns(tiers[TierStandard].litellmProvider) {
+			continue
+		}
+		twin := azureOpenAITwin(key)
+		if twin == "" {
+			continue
+		}
+		twinTiers, ok := models[twin]
+		if !ok || !ProviderOpenAI.owns(twinTiers[TierStandard].litellmProvider) {
+			continue
+		}
+		for tier, r := range tiers {
+			twinR, ok := twinTiers[tier]
+			if !ok {
+				continue
+			}
+			r.Base = backfillTierRates(r.Base, twinR.Base)
+			for i, ct := range r.Tiers {
+				for _, tt := range twinR.Tiers {
+					if tt.AbovePromptTokens == ct.AbovePromptTokens {
+						r.Tiers[i].TierRates = backfillTierRates(ct.TierRates, tt.TierRates)
+						break
+					}
+				}
+			}
+			tiers[tier] = r
+		}
+	}
+}
+
+// azureOpenAITwin returns the bare OpenAI pricing key for an Azure key by
+// stripping the "azure/" prefix and any single data-zone segment ("us/",
+// "eu/", "global/", …). Returns "" for non-Azure keys and deeper-nested keys
+// (image-quality variants) that have no chat-model twin.
+func azureOpenAITwin(key string) string {
+	rest, ok := strings.CutPrefix(key, "azure/")
+	if !ok {
+		return ""
+	}
+	// azure/{model} → model; azure/{zone}/{model} → model.
+	if seg, model, ok := strings.Cut(rest, "/"); ok {
+		if strings.Contains(model, "/") {
+			return "" // deeper nesting (image-quality keys), not a chat model
+		}
+		_ = seg
+		return model
+	}
+	return rest
+}
+
+// backfillTierRates copies non-nil rate fields from src into nil slots of dst.
+func backfillTierRates(dst, src TierRates) TierRates {
+	if dst.Input == nil {
+		dst.Input = cpRat(src.Input)
+	}
+	if dst.CacheRead == nil {
+		dst.CacheRead = cpRat(src.CacheRead)
+	}
+	if dst.CacheCreation == nil {
+		dst.CacheCreation = cpRat(src.CacheCreation)
+	}
+	if dst.CacheCreation1h == nil {
+		dst.CacheCreation1h = cpRat(src.CacheCreation1h)
+	}
+	if dst.Output == nil {
+		dst.Output = cpRat(src.Output)
+	}
+	return dst
+}
 
 // serviceSuffixes maps each ServiceTier to the key suffix LiteLLM appends to
 // that tier's rate variants (input_cost_per_token_flex,

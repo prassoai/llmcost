@@ -937,6 +937,198 @@ func TestInvalidUsagePanics(t *testing.T) {
 	mustPanic("unknown model, negative input", func() { Cost("no-such-model", ClaudeUsage{InputTokens: -1}) })
 }
 
+// TestAzureCacheWriteBackfill encodes the Azure cache-write inheritance
+// requirement: Azure OpenAI entries in the vendored data carry null
+// cache_creation_input_token_cost while their OpenAI direct-API twins have it
+// populated. The backfill must resolve the Azure entry's cache-write rate to
+// the twin's value — at both the base and context-window-tier levels, across
+// every service tier the Azure entry defines, and for every data-zone variant
+// (azure/, azure/us/, azure/eu/). Without this, Azure-served cache-write-heavy
+// traffic under-bills by up to 98% (cache writes priced at $0).
+func TestAzureCacheWriteBackfill(t *testing.T) {
+	for _, tc := range []struct {
+		azure, twin string
+		// wantCC is the expected cache_creation rate at the base level.
+		wantCC *big.Rat
+	}{
+		{"azure/gpt-5.6-sol", "gpt-5.6-sol", big.NewRat(625, 100_000_000)},       // 6.25e-6
+		{"azure/us/gpt-5.6-sol", "gpt-5.6-sol", big.NewRat(625, 100_000_000)},    // 6.25e-6
+		{"azure/eu/gpt-5.6-sol", "gpt-5.6-sol", big.NewRat(625, 100_000_000)},    // 6.25e-6
+		{"azure/gpt-5.6-luna", "gpt-5.6-luna", big.NewRat(1, 4_000_000)},          // 2.5e-7
+		{"azure/us/gpt-5.6-luna", "gpt-5.6-luna", big.NewRat(1, 4_000_000)},      // 2.5e-7
+		{"azure/eu/gpt-5.6-luna", "gpt-5.6-luna", big.NewRat(1, 4_000_000)},      // 2.5e-7
+		{"azure/gpt-5.6-terra", "gpt-5.6-terra", big.NewRat(25, 10_000_000)},     // 2.5e-6
+		{"azure/us/gpt-5.6-terra", "gpt-5.6-terra", big.NewRat(25, 10_000_000)},  // 2.5e-6
+		{"azure/eu/gpt-5.6-terra", "gpt-5.6-terra", big.NewRat(25, 10_000_000)},  // 2.5e-6
+		{"azure/gpt-5.6", "gpt-5.6", big.NewRat(625, 100_000_000)},               // 6.25e-6
+		{"azure/us/gpt-5.6", "gpt-5.6", big.NewRat(625, 100_000_000)},            // 6.25e-6
+		{"azure/eu/gpt-5.6", "gpt-5.6", big.NewRat(625, 100_000_000)},            // 6.25e-6
+	} {
+		azR, azOK := RatesFor(tc.azure, TierStandard)
+		twinR, twinOK := RatesFor(tc.twin, TierStandard)
+		if !azOK || !twinOK {
+			t.Errorf("%s: azure ok=%v, twin ok=%v; want both true", tc.azure, azOK, twinOK)
+			continue
+		}
+		if azR.Base.CacheCreation == nil {
+			t.Errorf("%s: CacheCreation is nil after backfill; want %v", tc.azure, tc.wantCC)
+			continue
+		}
+		if azR.Base.CacheCreation.Cmp(tc.wantCC) != 0 {
+			t.Errorf("%s: CacheCreation = %v; want %v (== %s twin)", tc.azure, azR.Base.CacheCreation, tc.wantCC, tc.twin)
+		}
+		if twinR.Base.CacheCreation == nil || azR.Base.CacheCreation.Cmp(twinR.Base.CacheCreation) != 0 {
+			t.Errorf("%s: CacheCreation %v != twin CacheCreation %v", tc.azure, azR.Base.CacheCreation, twinR.Base.CacheCreation)
+		}
+	}
+}
+
+// TestAzureCacheWriteTieredBackfill encodes that the cache-write backfill
+// extends to context-window tiers: the Azure entry's 272k tier must inherit
+// the twin's tiered cache-creation rate, not just the base rate. Without this,
+// a >272k-prompt Azure request bills cache writes at $0 even when the base
+// rate is backfilled.
+func TestAzureCacheWriteTieredBackfill(t *testing.T) {
+	azR, azOK := RatesFor("azure/gpt-5.6-sol", TierStandard)
+	twinR, twinOK := RatesFor("gpt-5.6-sol", TierStandard)
+	if !azOK || !twinOK {
+		t.Fatal("azure or twin did not resolve")
+	}
+	// Both must have the 272k context-window tier.
+	azTier := tierByThreshold(azR.Tiers, 272000)
+	twinTier := tierByThreshold(twinR.Tiers, 272000)
+	if azTier == nil || twinTier == nil {
+		t.Fatalf("272k tier missing: azure=%v, twin=%v", azTier != nil, twinTier != nil)
+	}
+	if azTier.CacheCreation == nil {
+		t.Fatal("azure 272k tier CacheCreation is nil after backfill")
+	}
+	// 1.25e-5 = 125/10,000,000
+	want := big.NewRat(125, 10_000_000)
+	if azTier.CacheCreation.Cmp(want) != 0 {
+		t.Errorf("azure 272k tier CacheCreation = %v; want %v", azTier.CacheCreation, want)
+	}
+	if twinTier.CacheCreation == nil || azTier.CacheCreation.Cmp(twinTier.CacheCreation) != 0 {
+		t.Errorf("azure 272k CacheCreation %v != twin %v", azTier.CacheCreation, twinTier.CacheCreation)
+	}
+}
+
+// TestAzureCacheWriteServiceTierBackfill encodes that the backfill covers
+// every service tier the Azure entry defines. Azure gpt-5.6-sol defines a
+// priority tier; its cache-creation rates must inherit from the OpenAI twin's
+// priority tier.
+func TestAzureCacheWriteServiceTierBackfill(t *testing.T) {
+	azR, azOK := RatesFor("azure/gpt-5.6-sol", TierPriority)
+	twinR, twinOK := RatesFor("gpt-5.6-sol", TierPriority)
+	if !azOK || !twinOK {
+		t.Skipf("priority tier not present: azure ok=%v, twin ok=%v", azOK, twinOK)
+	}
+	if azR.Base.CacheCreation == nil {
+		t.Fatal("azure priority CacheCreation is nil after backfill")
+	}
+	if twinR.Base.CacheCreation == nil || azR.Base.CacheCreation.Cmp(twinR.Base.CacheCreation) != 0 {
+		t.Errorf("azure priority CacheCreation %v != twin %v", azR.Base.CacheCreation, twinR.Base.CacheCreation)
+	}
+}
+
+// TestAzureCacheWriteCostMatchesTwin encodes the billing requirement end to
+// end: an Azure gpt-5.6 cache-write-heavy response must actually price cache
+// writes — the cost must be strictly greater than the cost without cache
+// writes, and the global (non-zone) Azure key must match the OpenAI twin
+// exactly (they share the same base rates). Data-zone keys (azure/us/,
+// azure/eu/) carry a ~10% premium on input/output/cache-read, so their total
+// cost is higher than the twin's — but cache-write rate equality is verified
+// by TestAzureCacheWriteBackfill above.
+func TestAzureCacheWriteCostMatchesTwin(t *testing.T) {
+	withWrites := OpenAIUsage{InputTokens: 10000, CachedInputTokens: 2000, CacheWriteTokens: 5000, OutputTokens: 1000}
+	noWrites := OpenAIUsage{InputTokens: 5000, CachedInputTokens: 2000, OutputTokens: 1000}
+	for _, pair := range [][2]string{
+		{"azure/gpt-5.6-sol", "gpt-5.6-sol"},
+		{"azure/gpt-5.6-luna", "gpt-5.6-luna"},
+		{"azure/gpt-5.6-terra", "gpt-5.6-terra"},
+	} {
+		azCost, azOK := Cost(pair[0], withWrites)
+		twinCost, twinOK := Cost(pair[1], withWrites)
+		if !azOK || !twinOK {
+			t.Errorf("%s: azure ok=%v, twin ok=%v", pair[0], azOK, twinOK)
+			continue
+		}
+		// Global Azure keys share the same base rates as the OpenAI twin.
+		if azCost != twinCost {
+			t.Errorf("%s: cost %d != twin %s cost %d", pair[0], azCost, pair[1], twinCost)
+		}
+		// Cache writes must contribute to the cost — the whole point of the fix.
+		azNoWrites, _ := Cost(pair[0], noWrites)
+		if azCost <= azNoWrites {
+			t.Errorf("%s: cost with cache writes %d <= without %d — writes not priced", pair[0], azCost, azNoWrites)
+		}
+	}
+	// Data-zone keys have higher base rates; verify cache writes are priced
+	// (cost with writes > cost without) even though the total won't match
+	// the OpenAI twin exactly.
+	for _, key := range []string{"azure/us/gpt-5.6-sol", "azure/eu/gpt-5.6-sol"} {
+		with, withOK := Cost(key, withWrites)
+		without, withoutOK := Cost(key, noWrites)
+		if !withOK || !withoutOK {
+			t.Errorf("%s: ok with=%v, without=%v", key, withOK, withoutOK)
+			continue
+		}
+		if with <= without {
+			t.Errorf("%s: cost with cache writes %d <= without %d — writes not priced", key, with, without)
+		}
+	}
+}
+
+// TestAzureBackfillPreservesExistingRates encodes that the backfill never
+// overwrites a rate the Azure entry already has — it only fills nil slots.
+// Input, CacheRead, and Output are always populated on priceable Azure entries
+// and must remain unchanged.
+func TestAzureBackfillPreservesExistingRates(t *testing.T) {
+	azR, _ := RatesFor("azure/gpt-5.6-sol", TierStandard)
+	twinR, _ := RatesFor("gpt-5.6-sol", TierStandard)
+	// Input, CacheRead, and Output must match the twin (Azure prices these
+	// identically for gpt-5.6) and must not be nil.
+	for name, pair := range map[string][2]*big.Rat{
+		"Input":     {azR.Base.Input, twinR.Base.Input},
+		"CacheRead": {azR.Base.CacheRead, twinR.Base.CacheRead},
+		"Output":    {azR.Base.Output, twinR.Base.Output},
+	} {
+		if pair[0] == nil {
+			t.Errorf("%s is nil", name)
+		} else if pair[0].Cmp(pair[1]) != 0 {
+			t.Errorf("%s: azure %v != twin %v", name, pair[0], pair[1])
+		}
+	}
+}
+
+// TestAzureOpenAITwin encodes the key-stripping logic that maps Azure pricing
+// keys to their OpenAI direct-API twins.
+func TestAzureOpenAITwin(t *testing.T) {
+	for key, want := range map[string]string{
+		"azure/gpt-5.6-sol":                      "gpt-5.6-sol",
+		"azure/us/gpt-5.6-sol":                   "gpt-5.6-sol",
+		"azure/eu/gpt-5.6-sol":                   "gpt-5.6-sol",
+		"azure/global/gpt-5.1":                   "gpt-5.1",
+		"azure/global-standard/gpt-4o-2024-08-06": "gpt-4o-2024-08-06",
+		"azure/gpt-5.4":                           "gpt-5.4",
+		"gpt-5.6-sol":                             "",  // not an Azure key
+		"azure/high/1024-x-1024/gpt-image-1":      "",  // deeper nesting
+	} {
+		if got := azureOpenAITwin(key); got != want {
+			t.Errorf("azureOpenAITwin(%q) = %q; want %q", key, got, want)
+		}
+	}
+}
+
+func tierByThreshold(tiers []Tier, threshold int64) *TierRates {
+	for _, t := range tiers {
+		if t.AbovePromptTokens == threshold {
+			return &t.TierRates
+		}
+	}
+	return nil
+}
+
 // TestRatParsesDecimalLiteralsExactly encodes the no-float64 requirement:
 // rates come out of the JSON as exact rationals of their decimal literals.
 // 2.5e-7 is exactly 1/4,000,000 — a value float64 cannot represent.
