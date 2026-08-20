@@ -951,18 +951,18 @@ func TestAzureCacheWriteBackfill(t *testing.T) {
 		// wantCC is the expected cache_creation rate at the base level.
 		wantCC *big.Rat
 	}{
-		{"azure/gpt-5.6-sol", "gpt-5.6-sol", big.NewRat(625, 100_000_000)},       // 6.25e-6
-		{"azure/us/gpt-5.6-sol", "gpt-5.6-sol", big.NewRat(625, 100_000_000)},    // 6.25e-6
-		{"azure/eu/gpt-5.6-sol", "gpt-5.6-sol", big.NewRat(625, 100_000_000)},    // 6.25e-6
-		{"azure/gpt-5.6-luna", "gpt-5.6-luna", big.NewRat(1, 4_000_000)},          // 2.5e-7
-		{"azure/us/gpt-5.6-luna", "gpt-5.6-luna", big.NewRat(1, 4_000_000)},      // 2.5e-7
-		{"azure/eu/gpt-5.6-luna", "gpt-5.6-luna", big.NewRat(1, 4_000_000)},      // 2.5e-7
-		{"azure/gpt-5.6-terra", "gpt-5.6-terra", big.NewRat(25, 10_000_000)},     // 2.5e-6
-		{"azure/us/gpt-5.6-terra", "gpt-5.6-terra", big.NewRat(25, 10_000_000)},  // 2.5e-6
-		{"azure/eu/gpt-5.6-terra", "gpt-5.6-terra", big.NewRat(25, 10_000_000)},  // 2.5e-6
-		{"azure/gpt-5.6", "gpt-5.6", big.NewRat(625, 100_000_000)},               // 6.25e-6
-		{"azure/us/gpt-5.6", "gpt-5.6", big.NewRat(625, 100_000_000)},            // 6.25e-6
-		{"azure/eu/gpt-5.6", "gpt-5.6", big.NewRat(625, 100_000_000)},            // 6.25e-6
+		{"azure/gpt-5.6-sol", "gpt-5.6-sol", big.NewRat(625, 100_000_000)},      // 6.25e-6
+		{"azure/us/gpt-5.6-sol", "gpt-5.6-sol", big.NewRat(625, 100_000_000)},   // 6.25e-6
+		{"azure/eu/gpt-5.6-sol", "gpt-5.6-sol", big.NewRat(625, 100_000_000)},   // 6.25e-6
+		{"azure/gpt-5.6-luna", "gpt-5.6-luna", big.NewRat(1, 4_000_000)},        // 2.5e-7
+		{"azure/us/gpt-5.6-luna", "gpt-5.6-luna", big.NewRat(1, 4_000_000)},     // 2.5e-7
+		{"azure/eu/gpt-5.6-luna", "gpt-5.6-luna", big.NewRat(1, 4_000_000)},     // 2.5e-7
+		{"azure/gpt-5.6-terra", "gpt-5.6-terra", big.NewRat(25, 10_000_000)},    // 2.5e-6
+		{"azure/us/gpt-5.6-terra", "gpt-5.6-terra", big.NewRat(25, 10_000_000)}, // 2.5e-6
+		{"azure/eu/gpt-5.6-terra", "gpt-5.6-terra", big.NewRat(25, 10_000_000)}, // 2.5e-6
+		{"azure/gpt-5.6", "gpt-5.6", big.NewRat(625, 100_000_000)},              // 6.25e-6
+		{"azure/us/gpt-5.6", "gpt-5.6", big.NewRat(625, 100_000_000)},           // 6.25e-6
+		{"azure/eu/gpt-5.6", "gpt-5.6", big.NewRat(625, 100_000_000)},           // 6.25e-6
 	} {
 		azR, azOK := RatesFor(tc.azure, TierStandard)
 		twinR, twinOK := RatesFor(tc.twin, TierStandard)
@@ -1105,14 +1105,14 @@ func TestAzureBackfillPreservesExistingRates(t *testing.T) {
 // keys to their OpenAI direct-API twins.
 func TestAzureOpenAITwin(t *testing.T) {
 	for key, want := range map[string]string{
-		"azure/gpt-5.6-sol":                      "gpt-5.6-sol",
-		"azure/us/gpt-5.6-sol":                   "gpt-5.6-sol",
-		"azure/eu/gpt-5.6-sol":                   "gpt-5.6-sol",
-		"azure/global/gpt-5.1":                   "gpt-5.1",
+		"azure/gpt-5.6-sol":                       "gpt-5.6-sol",
+		"azure/us/gpt-5.6-sol":                    "gpt-5.6-sol",
+		"azure/eu/gpt-5.6-sol":                    "gpt-5.6-sol",
+		"azure/global/gpt-5.1":                    "gpt-5.1",
 		"azure/global-standard/gpt-4o-2024-08-06": "gpt-4o-2024-08-06",
 		"azure/gpt-5.4":                           "gpt-5.4",
-		"gpt-5.6-sol":                             "",  // not an Azure key
-		"azure/high/1024-x-1024/gpt-image-1":      "",  // deeper nesting
+		"gpt-5.6-sol":                             "", // not an Azure key
+		"azure/high/1024-x-1024/gpt-image-1":      "", // deeper nesting
 	} {
 		if got := azureOpenAITwin(key); got != want {
 			t.Errorf("azureOpenAITwin(%q) = %q; want %q", key, got, want)
