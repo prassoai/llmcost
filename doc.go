@@ -226,4 +226,18 @@
 // drops the canary models. Merges to main are auto-tagged with the next
 // patch version so consumers get a real Go module tag — and consumers'
 // resolution tests catch dropped models when they bump.
+//
+// # Azure rate backfill
+//
+// LiteLLM's vendored data systematically lists Azure OpenAI entries with null
+// cache_creation_input_token_cost (and occasionally other cache-rate fields)
+// while their OpenAI direct-API twins have the values populated. Azure OpenAI
+// charges cache writes at the same rates as OpenAI direct, so the nulls are an
+// upstream data gap. At table-construction time, the module backfills nil rate
+// fields in Azure entries (litellm_provider "azure") from the corresponding
+// OpenAI twin — the key found by stripping the "azure/" prefix and any
+// data-zone segment ("us/", "eu/"). The backfill covers base rates and
+// context-window tiers at every service tier the Azure entry defines, and it
+// never overwrites a rate the Azure entry already has. This lives in code so
+// it survives re-vendoring automatically.
 package llmcost
