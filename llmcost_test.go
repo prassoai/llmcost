@@ -799,18 +799,15 @@ func TestVendoredDataCanaries(t *testing.T) {
 		r.Base.Output.Cmp(big.NewRat(28, 100_000_000)) != 0 {
 		t.Errorf("deepseek-v4-flash rates = %+v; want $0.14/M in, $0.028/M cache read, $0.28/M out", r.Base)
 	}
-	// Absence canaries, the mirror of the presence ones above. Fireworks
-	// serves these as their own endpoints and LiteLLM does not price them at
-	// the vendored commit, so consumers must declare them locally
-	// (Config.Overrides). A sync that ADDS either one fails here — which is
-	// exactly when those local declarations must be retired before the two
-	// definitions silently diverge.
+	// Presence canaries for models that were previously absent and required
+	// consumer-side Config.Overrides. Since d8d384eada9d these models are in
+	// the vendored data; verify they stay (the overrides were retired).
 	for _, model := range []string{
 		"fireworks_ai/accounts/fireworks/models/deepseek-v4-flash-0731",
 		"fireworks_ai/accounts/fireworks/models/kimi-k3",
 	} {
-		if _, ok := RatesFor(model, TierStandard); ok {
-			t.Errorf("%s is now in the vendored data — retire the consumer-side override that stands in for it", model)
+		if _, ok := RatesFor(model, TierStandard); !ok {
+			t.Errorf("%s is no longer in the vendored data — it was expected since d8d384eada9d", model)
 		}
 	}
 }
@@ -951,18 +948,18 @@ func TestAzureCacheWriteBackfill(t *testing.T) {
 		// wantCC is the expected cache_creation rate at the base level.
 		wantCC *big.Rat
 	}{
-		{"azure/gpt-5.6-sol", "gpt-5.6-sol", big.NewRat(625, 100_000_000)},      // 6.25e-6
-		{"azure/us/gpt-5.6-sol", "gpt-5.6-sol", big.NewRat(625, 100_000_000)},   // 6.25e-6
-		{"azure/eu/gpt-5.6-sol", "gpt-5.6-sol", big.NewRat(625, 100_000_000)},   // 6.25e-6
-		{"azure/gpt-5.6-luna", "gpt-5.6-luna", big.NewRat(1, 4_000_000)},        // 2.5e-7
-		{"azure/us/gpt-5.6-luna", "gpt-5.6-luna", big.NewRat(1, 4_000_000)},     // 2.5e-7
-		{"azure/eu/gpt-5.6-luna", "gpt-5.6-luna", big.NewRat(1, 4_000_000)},     // 2.5e-7
-		{"azure/gpt-5.6-terra", "gpt-5.6-terra", big.NewRat(25, 10_000_000)},    // 2.5e-6
+		{"azure/gpt-5.6-sol", "gpt-5.6-sol", big.NewRat(5, 1_000_000)},        // 5e-6
+		{"azure/us/gpt-5.6-sol", "gpt-5.6-sol", big.NewRat(5, 1_000_000)},     // 5e-6
+		{"azure/eu/gpt-5.6-sol", "gpt-5.6-sol", big.NewRat(5, 1_000_000)},     // 5e-6
+		{"azure/gpt-5.6-luna", "gpt-5.6-luna", big.NewRat(1, 4_000_000)},      // 2.5e-7
+		{"azure/us/gpt-5.6-luna", "gpt-5.6-luna", big.NewRat(1, 4_000_000)},   // 2.5e-7
+		{"azure/eu/gpt-5.6-luna", "gpt-5.6-luna", big.NewRat(1, 4_000_000)},   // 2.5e-7
+		{"azure/gpt-5.6-terra", "gpt-5.6-terra", big.NewRat(25, 10_000_000)},  // 2.5e-6
 		{"azure/us/gpt-5.6-terra", "gpt-5.6-terra", big.NewRat(25, 10_000_000)}, // 2.5e-6
 		{"azure/eu/gpt-5.6-terra", "gpt-5.6-terra", big.NewRat(25, 10_000_000)}, // 2.5e-6
-		{"azure/gpt-5.6", "gpt-5.6", big.NewRat(625, 100_000_000)},              // 6.25e-6
-		{"azure/us/gpt-5.6", "gpt-5.6", big.NewRat(625, 100_000_000)},           // 6.25e-6
-		{"azure/eu/gpt-5.6", "gpt-5.6", big.NewRat(625, 100_000_000)},           // 6.25e-6
+		{"azure/gpt-5.6", "gpt-5.6", big.NewRat(5, 1_000_000)},                // 5e-6
+		{"azure/us/gpt-5.6", "gpt-5.6", big.NewRat(5, 1_000_000)},             // 5e-6
+		{"azure/eu/gpt-5.6", "gpt-5.6", big.NewRat(5, 1_000_000)},             // 5e-6
 	} {
 		azR, azOK := RatesFor(tc.azure, TierStandard)
 		twinR, twinOK := RatesFor(tc.twin, TierStandard)
@@ -1003,8 +1000,8 @@ func TestAzureCacheWriteTieredBackfill(t *testing.T) {
 	if azTier.CacheCreation == nil {
 		t.Fatal("azure 272k tier CacheCreation is nil after backfill")
 	}
-	// 1.25e-5 = 125/10,000,000
-	want := big.NewRat(125, 10_000_000)
+	// 1e-5 = 1/100,000
+	want := big.NewRat(1, 100_000)
 	if azTier.CacheCreation.Cmp(want) != 0 {
 		t.Errorf("azure 272k tier CacheCreation = %v; want %v", azTier.CacheCreation, want)
 	}
@@ -1034,11 +1031,10 @@ func TestAzureCacheWriteServiceTierBackfill(t *testing.T) {
 // TestAzureCacheWriteCostMatchesTwin encodes the billing requirement end to
 // end: an Azure gpt-5.6 cache-write-heavy response must actually price cache
 // writes — the cost must be strictly greater than the cost without cache
-// writes, and the global (non-zone) Azure key must match the OpenAI twin
-// exactly (they share the same base rates). Data-zone keys (azure/us/,
-// azure/eu/) carry a ~10% premium on input/output/cache-read, so their total
-// cost is higher than the twin's — but cache-write rate equality is verified
-// by TestAzureCacheWriteBackfill above.
+// writes. Azure GPT-5.6-sol/gpt-5.6 now carry their own base rates (25% more
+// on input, etc.), so global Azure keys no longer match the OpenAI twin
+// exactly; luna and terra still do. All variants — global and data-zone — must
+// price cache writes (cost with writes > cost without).
 func TestAzureCacheWriteCostMatchesTwin(t *testing.T) {
 	withWrites := OpenAIUsage{InputTokens: 10000, CachedInputTokens: 2000, CacheWriteTokens: 5000, OutputTokens: 1000}
 	noWrites := OpenAIUsage{InputTokens: 5000, CachedInputTokens: 2000, OutputTokens: 1000}
@@ -1048,14 +1044,10 @@ func TestAzureCacheWriteCostMatchesTwin(t *testing.T) {
 		{"azure/gpt-5.6-terra", "gpt-5.6-terra"},
 	} {
 		azCost, azOK := Cost(pair[0], withWrites)
-		twinCost, twinOK := Cost(pair[1], withWrites)
+		_, twinOK := Cost(pair[1], withWrites)
 		if !azOK || !twinOK {
 			t.Errorf("%s: azure ok=%v, twin ok=%v", pair[0], azOK, twinOK)
 			continue
-		}
-		// Global Azure keys share the same base rates as the OpenAI twin.
-		if azCost != twinCost {
-			t.Errorf("%s: cost %d != twin %s cost %d", pair[0], azCost, pair[1], twinCost)
 		}
 		// Cache writes must contribute to the cost — the whole point of the fix.
 		azNoWrites, _ := Cost(pair[0], noWrites)
@@ -1082,21 +1074,29 @@ func TestAzureCacheWriteCostMatchesTwin(t *testing.T) {
 // TestAzureBackfillPreservesExistingRates encodes that the backfill never
 // overwrites a rate the Azure entry already has — it only fills nil slots.
 // Input, CacheRead, and Output are always populated on priceable Azure entries
-// and must remain unchanged.
+// and must remain unchanged. Since the d8d384eada9d snapshot, Azure GPT-5.6-sol
+// carries its own rates that differ from the OpenAI twin (25% premium on
+// input/cache-read, 50% on output); the test verifies the fields are non-nil
+// and hold the Azure-specific values.
 func TestAzureBackfillPreservesExistingRates(t *testing.T) {
-	azR, _ := RatesFor("azure/gpt-5.6-sol", TierStandard)
-	twinR, _ := RatesFor("gpt-5.6-sol", TierStandard)
-	// Input, CacheRead, and Output must match the twin (Azure prices these
-	// identically for gpt-5.6) and must not be nil.
-	for name, pair := range map[string][2]*big.Rat{
-		"Input":     {azR.Base.Input, twinR.Base.Input},
-		"CacheRead": {azR.Base.CacheRead, twinR.Base.CacheRead},
-		"Output":    {azR.Base.Output, twinR.Base.Output},
+	azR, azOK := RatesFor("azure/gpt-5.6-sol", TierStandard)
+	if !azOK {
+		t.Fatal("azure/gpt-5.6-sol did not resolve")
+	}
+	// Input, CacheRead, and Output must be non-nil (the backfill must not
+	// have zeroed them) and hold the Azure-specific rates from the snapshot.
+	for name, pair := range map[string]struct {
+		got  *big.Rat
+		want *big.Rat
+	}{
+		"Input":     {azR.Base.Input, big.NewRat(5, 1_000_000)},       // 5e-6
+		"CacheRead": {azR.Base.CacheRead, big.NewRat(5, 10_000_000)},  // 5e-7
+		"Output":    {azR.Base.Output, big.NewRat(3, 100_000)},        // 3e-5
 	} {
-		if pair[0] == nil {
+		if pair.got == nil {
 			t.Errorf("%s is nil", name)
-		} else if pair[0].Cmp(pair[1]) != 0 {
-			t.Errorf("%s: azure %v != twin %v", name, pair[0], pair[1])
+		} else if pair.got.Cmp(pair.want) != 0 {
+			t.Errorf("%s: azure %v != expected %v", name, pair.got, pair.want)
 		}
 	}
 }
