@@ -948,18 +948,18 @@ func TestAzureCacheWriteBackfill(t *testing.T) {
 		// wantCC is the expected cache_creation rate at the base level.
 		wantCC *big.Rat
 	}{
-		{"azure/gpt-5.6-sol", "gpt-5.6-sol", big.NewRat(5, 1_000_000)},        // 5e-6
-		{"azure/us/gpt-5.6-sol", "gpt-5.6-sol", big.NewRat(5, 1_000_000)},     // 5e-6
-		{"azure/eu/gpt-5.6-sol", "gpt-5.6-sol", big.NewRat(5, 1_000_000)},     // 5e-6
-		{"azure/gpt-5.6-luna", "gpt-5.6-luna", big.NewRat(1, 4_000_000)},      // 2.5e-7
-		{"azure/us/gpt-5.6-luna", "gpt-5.6-luna", big.NewRat(1, 4_000_000)},   // 2.5e-7
-		{"azure/eu/gpt-5.6-luna", "gpt-5.6-luna", big.NewRat(1, 4_000_000)},   // 2.5e-7
-		{"azure/gpt-5.6-terra", "gpt-5.6-terra", big.NewRat(25, 10_000_000)},  // 2.5e-6
+		{"azure/gpt-5.6-sol", "gpt-5.6-sol", big.NewRat(5, 1_000_000)},          // 5e-6
+		{"azure/us/gpt-5.6-sol", "gpt-5.6-sol", big.NewRat(5, 1_000_000)},       // 5e-6
+		{"azure/eu/gpt-5.6-sol", "gpt-5.6-sol", big.NewRat(5, 1_000_000)},       // 5e-6
+		{"azure/gpt-5.6-luna", "gpt-5.6-luna", big.NewRat(1, 4_000_000)},        // 2.5e-7
+		{"azure/us/gpt-5.6-luna", "gpt-5.6-luna", big.NewRat(1, 4_000_000)},     // 2.5e-7
+		{"azure/eu/gpt-5.6-luna", "gpt-5.6-luna", big.NewRat(1, 4_000_000)},     // 2.5e-7
+		{"azure/gpt-5.6-terra", "gpt-5.6-terra", big.NewRat(25, 10_000_000)},    // 2.5e-6
 		{"azure/us/gpt-5.6-terra", "gpt-5.6-terra", big.NewRat(25, 10_000_000)}, // 2.5e-6
 		{"azure/eu/gpt-5.6-terra", "gpt-5.6-terra", big.NewRat(25, 10_000_000)}, // 2.5e-6
-		{"azure/gpt-5.6", "gpt-5.6", big.NewRat(5, 1_000_000)},                // 5e-6
-		{"azure/us/gpt-5.6", "gpt-5.6", big.NewRat(5, 1_000_000)},             // 5e-6
-		{"azure/eu/gpt-5.6", "gpt-5.6", big.NewRat(5, 1_000_000)},             // 5e-6
+		{"azure/gpt-5.6", "gpt-5.6", big.NewRat(5, 1_000_000)},                  // 5e-6
+		{"azure/us/gpt-5.6", "gpt-5.6", big.NewRat(5, 1_000_000)},               // 5e-6
+		{"azure/eu/gpt-5.6", "gpt-5.6", big.NewRat(5, 1_000_000)},               // 5e-6
 	} {
 		azR, azOK := RatesFor(tc.azure, TierStandard)
 		twinR, twinOK := RatesFor(tc.twin, TierStandard)
@@ -1089,9 +1089,9 @@ func TestAzureBackfillPreservesExistingRates(t *testing.T) {
 		got  *big.Rat
 		want *big.Rat
 	}{
-		"Input":     {azR.Base.Input, big.NewRat(5, 1_000_000)},       // 5e-6
-		"CacheRead": {azR.Base.CacheRead, big.NewRat(5, 10_000_000)},  // 5e-7
-		"Output":    {azR.Base.Output, big.NewRat(3, 100_000)},        // 3e-5
+		"Input":     {azR.Base.Input, big.NewRat(5, 1_000_000)},      // 5e-6
+		"CacheRead": {azR.Base.CacheRead, big.NewRat(5, 10_000_000)}, // 5e-7
+		"Output":    {azR.Base.Output, big.NewRat(3, 100_000)},       // 3e-5
 	} {
 		if pair.got == nil {
 			t.Errorf("%s is nil", name)
