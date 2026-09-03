@@ -121,15 +121,16 @@
 // as LiteLLM's calculator prices it from the same data.
 //
 // Anthropic's fast mode (request speed:"fast") bills uncached input and
-// output at the model's fast multiplier — 6× on claude-opus-4-6/4-7, 2× on
-// claude-opus-4-8 — and Anthropic's pinned-region inference
-// (usage.inference_geo, e.g. "us") at the model's geo multiplier (1.1×).
-// The two compose multiplicatively; cache reads and writes bill UNSCALED in
-// both modes. A fast response on a model without fast pricing, a pinned geo
-// without a factor, or an unrecognized Speed value fails to price: these
-// premiums reach 6×, so billing standard rates on a pricing-data lag is
-// exactly the silent underbill this module exists to prevent. The unpinned
-// geos "global" and "not_available" carry no premium.
+// output at the model's fast multiplier — 2× on claude-opus-4-8 and
+// claude-opus-5, the models the vendored snapshot fast-prices; LiteLLM
+// carried 6× for opus-4-6/4-7 and retired it — and Anthropic's pinned-region
+// inference (usage.inference_geo, e.g. "us") at the model's geo multiplier
+// (1.1×). The two compose multiplicatively; cache reads and writes bill
+// UNSCALED in both modes. A fast response on a model without fast pricing, a
+// pinned geo without a factor, or an unrecognized Speed value fails to price:
+// these premiums have reached 6×, so billing standard rates on a pricing-data
+// lag is exactly the silent underbill this module exists to prevent. The
+// unpinned geos "global" and "not_available" carry no premium.
 //
 // OpenAI's data residency (OpenAIUsage.DataResidency — "eu"/"us" when the
 // request was served by eu./us.api.openai.com) bills EVERY component, cache
@@ -229,15 +230,20 @@
 //
 // # Azure rate backfill
 //
-// LiteLLM's vendored data systematically lists Azure OpenAI entries with null
-// cache_creation_input_token_cost (and occasionally other cache-rate fields)
-// while their OpenAI direct-API twins have the values populated. Azure OpenAI
-// charges cache writes at the same rates as OpenAI direct, so the nulls are an
-// upstream data gap. At table-construction time, the module backfills nil rate
-// fields in Azure entries (litellm_provider "azure") from the corresponding
-// OpenAI twin — the key found by stripping the "azure/" prefix and any
-// data-zone segment ("us/", "eu/"). The backfill covers base rates and
-// context-window tiers at every service tier the Azure entry defines, and it
-// never overwrites a rate the Azure entry already has. This lives in code so
+// LiteLLM's vendored data leaves cache-rate fields null on some Azure OpenAI
+// entries while their OpenAI direct-API twins have them populated. A null is
+// not a $0 bill but a refusal to price, so every gap is Azure traffic that
+// would otherwise fail to cost. At table-construction time, the module
+// backfills nil rate fields in Azure entries (litellm_provider "azure") from
+// the corresponding OpenAI twin — the key found by stripping the "azure/"
+// prefix and any data-zone segment ("us/", "eu/"). The backfill covers base
+// rates and context-window tiers at every service tier the Azure entry
+// defines, and it never overwrites a rate the Azure entry already has.
+//
+// The twin's rate is a floor, not parity: where Azure publishes its own it
+// charges its own input rate — data-zone entries carry a ~10% premium — and
+// the same 1.25× cache-write ratio on top of it, so an inherited rate
+// under-states a premium zone by that margin. Prices Azure publishes always
+// win; the backfill only fills what upstream left null. It lives in code so
 // it survives re-vendoring automatically.
 package llmcost

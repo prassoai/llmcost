@@ -548,17 +548,21 @@ var table = sync.OnceValue(func() map[string]map[ServiceTier]Rates {
 })
 
 // backfillAzureRates fills nil per-token rate fields in Azure OpenAI entries
-// from their direct-API OpenAI twins. LiteLLM's vendored data systematically
-// lists Azure entries with null cache_creation_input_token_cost (and
-// occasionally other cache-rate fields) while the OpenAI twin has them
-// populated — Azure OpenAI charges the same cache-write rates as OpenAI
-// direct, so the nulls are an upstream data gap, not a pricing difference.
+// from their direct-API OpenAI twins. LiteLLM's vendored data leaves cache-rate
+// fields null on some Azure entries while the OpenAI twin has them populated,
+// and a nil rate makes Cost REFUSE any response reporting that component — so
+// each gap is Azure traffic the module would otherwise decline to price.
 //
 // The fallback strips the "azure/" prefix and any data-zone segment ("us/",
 // "eu/") to find the bare OpenAI key and inherits nil rate fields from it —
 // base rates AND context-window tier rates, at every service tier the Azure
 // entry defines. This lives in code so the fix survives re-vendoring without
 // hand-editing the JSON.
+//
+// The twin's rate is a floor, not parity: Azure prices its own entries off its
+// own input rate (data zones carry a ~10% premium) at the same 1.25×
+// cache-write ratio, so an inherited rate under-states a premium zone by that
+// margin. Rates the Azure entry publishes are therefore never overwritten.
 func backfillAzureRates(models map[string]map[ServiceTier]Rates) {
 	for key, tiers := range models {
 		if !ProviderAzure.owns(tiers[TierStandard].litellmProvider) {

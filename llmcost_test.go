@@ -2,6 +2,7 @@ package llmcost
 
 import (
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"slices"
 	"testing"
@@ -46,10 +47,20 @@ const gpt54Spec = `{
 	"litellm_provider": "openai"
 }`
 
-// opus46Spec mirrors claude-opus-4-6: $5/M input, $0.50/M cache read,
-// $6.25/M 5-minute cache write, $10/M 1-hour cache write, $25/M output, and
-// LiteLLM's provider_specific_entry price multipliers — 6× for fast mode,
-// 1.1× for us-pinned inference — which scale uncached input and output only.
+// opus46Spec carries claude-opus-4-6's rates — $5/M input, $0.50/M cache
+// read, $6.25/M 5-minute cache write, $10/M 1-hour cache write, $25/M output
+// — plus LiteLLM's provider_specific_entry price multipliers: 6× for fast
+// mode, 1.1× for us-pinned inference, which scale uncached input and output
+// only.
+//
+// The 6× fast factor is a fixture value, not current upstream data: LiteLLM
+// carried it for opus-4-6/4-7 through d8d384eada9d and retired it at
+// 828d561f, where the only fast-priced entries are opus-4-8 and opus-5 at 2×.
+// It stays 6× deliberately — these tests must distinguish "the multiplier
+// scales uncached input and output" from "the multiplier scales everything",
+// and the largest premium LiteLLM has published makes that error the most
+// visible. Assertions about what the live snapshot carries belong in
+// TestVendoredDataCanaries, not in a fixture.
 const opus46Spec = `{
 	"input_cost_per_token": 5e-06,
 	"cache_read_input_token_cost": 5e-07,
@@ -524,12 +535,17 @@ func TestUnknownServiceTier(t *testing.T) {
 
 // TestClaudeFastMode encodes Anthropic fast-mode pricing (LiteLLM's
 // provider_specific_entry.fast): a speed:"fast" request bills uncached input
-// and output at the fast multiplier (6× on opus-4-6) while cache reads and
+// and output at the fast multiplier (6× in opus46Spec) while cache reads and
 // writes bill UNSCALED — Anthropic does not premium-price cache traffic, and
 // LiteLLM's calculator excludes cache costs from the multiplier the same
 // way. Standard: 1000×5e-6 + 30000×5e-7 + 2000×6.25e-6 + 100×2.5e-5 =
 // $0.035 = 3500 nls. Fast: only input and output scale ×6 → 0.03 + 0.015 +
 // 0.0125 + 0.015 = $0.0725 = 7250 nls (scaling cache too would give $0.21).
+//
+// The cross-check runs against claude-opus-4-8 because the premium must
+// reach the exported entry point from real vendored data, and opus-4-8 is a
+// model the snapshot actually fast-prices (see TestVendoredDataCanaries;
+// upstream retired opus-4-6/4-7's fast factor at 828d561f).
 func TestClaudeFastMode(t *testing.T) {
 	r := mustParse(t, opus46Spec)
 	u := ClaudeUsage{InputTokens: 1000, CacheReadInputTokens: 30000, CacheCreationInputTokens: 2000, OutputTokens: 100}
@@ -541,10 +557,16 @@ func TestClaudeFastMode(t *testing.T) {
 		t.Fatalf("fast = %d, %v; want 7250, true", got, ok)
 	}
 	// The exported entry point resolves the same premium from the same raw usage.
-	viaAPI, ok := Cost("claude-opus-4-6", u)
-	direct, ok2 := price(table()["claude-opus-4-6"][TierStandard], u)
+	viaAPI, ok := Cost("claude-opus-4-8", u)
+	direct, ok2 := price(table()["claude-opus-4-8"][TierStandard], u)
 	if !ok || !ok2 || viaAPI != direct {
 		t.Fatalf("Cost(fast) = %d, %v; internal = %d, %v; want equal and ok", viaAPI, ok, direct, ok2)
+	}
+	// Fail-closed on the other side of the same data: a model the snapshot
+	// carries no fast factor for must refuse a fast request rather than bill
+	// it at standard rates. opus-4-6 is that case since 828d561f.
+	if _, ok := Cost("claude-opus-4-6", u); ok {
+		t.Error("Cost(claude-opus-4-6, fast) resolved; want ok=false — no fast factor in the snapshot")
 	}
 }
 
@@ -785,6 +807,18 @@ func TestVendoredDataCanaries(t *testing.T) {
 		r.Fast == nil || r.Fast.Cmp(big.NewRat(2, 1)) != 0 || r.Geo["us"] == nil {
 		t.Errorf("claude-opus-5 rates = %+v (fast %v, geo %v); want $5/M in, $25/M out, fast 2, a us factor", r.Base, r.Fast, r.Geo)
 	}
+	// claude-fable-5-1 arrived at 828d561f at $10/M input, $50/M output,
+	// $12.50/M 5-minute cache write — and $0.25/M cache read, which is 2.5% of
+	// input where every other Anthropic model charges 10%. That outlier is the
+	// canary: a sync that "normalizes" it to 10% quadruples what every cached
+	// Fable 5.1 read bills, and nothing else in the data would notice.
+	if r, ok := RatesFor("claude-fable-5-1", TierStandard); !ok ||
+		r.Base.Input.Cmp(big.NewRat(10, 1_000_000)) != 0 ||
+		r.Base.Output.Cmp(big.NewRat(50, 1_000_000)) != 0 ||
+		r.Base.CacheCreation == nil || r.Base.CacheCreation.Cmp(big.NewRat(125, 10_000_000)) != 0 ||
+		r.Base.CacheRead == nil || r.Base.CacheRead.Cmp(big.NewRat(25, 100_000_000)) != 0 {
+		t.Errorf("claude-fable-5-1 rates = %+v; want $10/M in, $50/M out, $12.50/M cache write, $0.25/M cache read", r.Base)
+	}
 	if r, ok := RatesFor("gpt-5.4", TierStandard); !ok || r.RegionalUplift["eu"] == nil || r.RegionalUplift["us"] == nil {
 		t.Errorf("gpt-5.4 regional uplifts = %v; want eu and us factors", r.RegionalUplift)
 	}
@@ -934,97 +968,168 @@ func TestInvalidUsagePanics(t *testing.T) {
 	mustPanic("unknown model, negative input", func() { Cost("no-such-model", ClaudeUsage{InputTokens: -1}) })
 }
 
-// TestAzureCacheWriteBackfill encodes the Azure cache-write inheritance
-// requirement: Azure OpenAI entries in the vendored data carry null
-// cache_creation_input_token_cost while their OpenAI direct-API twins have it
-// populated. The backfill must resolve the Azure entry's cache-write rate to
-// the twin's value — at both the base and context-window-tier levels, across
-// every service tier the Azure entry defines, and for every data-zone variant
-// (azure/, azure/us/, azure/eu/). Without this, Azure-served cache-write-heavy
-// traffic under-bills by up to 98% (cache writes priced at $0).
+// TestAzureCacheWriteBackfill encodes the backfill mechanism: a nil rate slot
+// on an Azure OpenAI entry inherits its OpenAI direct-API twin's value, at the
+// base level AND at each matching context-window tier, for every service tier
+// the Azure entry defines, and for every data-zone spelling (azure/{model},
+// azure/{zone}/{model}). Without it, an Azure entry LiteLLM ships with a null
+// cache_creation_input_token_cost bills cache writes at $0 — an under-bill of
+// up to 98% on cache-write-heavy traffic.
+//
+// It runs on constructed rates, not the vendored snapshot, deliberately: which
+// slots upstream leaves null moves with every re-vendor (at 828d561f every
+// gpt-5.6 Azure entry publishes its own cache-write rate and the backfill is a
+// no-op for them), so a snapshot-driven test would silently stop exercising the
+// mechanism it exists to protect. What the snapshot carries is pinned by
+// TestAzureCacheWriteRateRatio and TestVendoredDataCanaries instead.
 func TestAzureCacheWriteBackfill(t *testing.T) {
-	for _, tc := range []struct {
-		azure, twin string
-		// wantCC is the expected cache_creation rate at the base level.
-		wantCC *big.Rat
-	}{
-		{"azure/gpt-5.6-sol", "gpt-5.6-sol", big.NewRat(5, 1_000_000)},          // 5e-6
-		{"azure/us/gpt-5.6-sol", "gpt-5.6-sol", big.NewRat(5, 1_000_000)},       // 5e-6
-		{"azure/eu/gpt-5.6-sol", "gpt-5.6-sol", big.NewRat(5, 1_000_000)},       // 5e-6
-		{"azure/gpt-5.6-luna", "gpt-5.6-luna", big.NewRat(1, 4_000_000)},        // 2.5e-7
-		{"azure/us/gpt-5.6-luna", "gpt-5.6-luna", big.NewRat(1, 4_000_000)},     // 2.5e-7
-		{"azure/eu/gpt-5.6-luna", "gpt-5.6-luna", big.NewRat(1, 4_000_000)},     // 2.5e-7
-		{"azure/gpt-5.6-terra", "gpt-5.6-terra", big.NewRat(25, 10_000_000)},    // 2.5e-6
-		{"azure/us/gpt-5.6-terra", "gpt-5.6-terra", big.NewRat(25, 10_000_000)}, // 2.5e-6
-		{"azure/eu/gpt-5.6-terra", "gpt-5.6-terra", big.NewRat(25, 10_000_000)}, // 2.5e-6
-		{"azure/gpt-5.6", "gpt-5.6", big.NewRat(5, 1_000_000)},                  // 5e-6
-		{"azure/us/gpt-5.6", "gpt-5.6", big.NewRat(5, 1_000_000)},               // 5e-6
-		{"azure/eu/gpt-5.6", "gpt-5.6", big.NewRat(5, 1_000_000)},               // 5e-6
-	} {
-		azR, azOK := RatesFor(tc.azure, TierStandard)
-		twinR, twinOK := RatesFor(tc.twin, TierStandard)
-		if !azOK || !twinOK {
-			t.Errorf("%s: azure ok=%v, twin ok=%v; want both true", tc.azure, azOK, twinOK)
-			continue
+	rat := func(num, den int64) *big.Rat { return big.NewRat(num, den) }
+	// The twin publishes every rate; the Azure entries publish input and output
+	// only, at both service tiers and at the 272k context tier.
+	twin := func() Rates {
+		return Rates{
+			Base:  TierRates{Input: rat(4, 1_000_000), CacheRead: rat(4, 10_000_000), CacheCreation: rat(5, 1_000_000), Output: rat(2, 100_000)},
+			Tiers: []Tier{{AbovePromptTokens: 272_000, TierRates: TierRates{Input: rat(8, 1_000_000), CacheRead: rat(8, 10_000_000), CacheCreation: rat(1, 100_000), Output: rat(3, 100_000)}}},
+
+			litellmProvider: "openai",
 		}
-		if azR.Base.CacheCreation == nil {
-			t.Errorf("%s: CacheCreation is nil after backfill; want %v", tc.azure, tc.wantCC)
-			continue
+	}
+	azure := func() Rates {
+		return Rates{
+			Base:  TierRates{Input: rat(5, 1_000_000), Output: rat(25, 1_000_000)},
+			Tiers: []Tier{{AbovePromptTokens: 272_000, TierRates: TierRates{Input: rat(1, 100_000), Output: rat(375, 10_000_000)}}},
+
+			litellmProvider: "azure",
 		}
-		if azR.Base.CacheCreation.Cmp(tc.wantCC) != 0 {
-			t.Errorf("%s: CacheCreation = %v; want %v (== %s twin)", tc.azure, azR.Base.CacheCreation, tc.wantCC, tc.twin)
+	}
+	models := map[string]map[ServiceTier]Rates{
+		"gpt-5.6-sol":          {TierStandard: twin(), TierPriority: twin()},
+		"azure/gpt-5.6-sol":    {TierStandard: azure(), TierPriority: azure()},
+		"azure/us/gpt-5.6-sol": {TierStandard: azure()},
+	}
+	backfillAzureRates(models)
+
+	for _, key := range []string{"azure/gpt-5.6-sol", "azure/us/gpt-5.6-sol"} {
+		for tier, got := range models[key] {
+			twinR, azR := models["gpt-5.6-sol"][tier], azure()
+			for _, c := range []struct {
+				what                string
+				got, twin, original TierRates
+			}{
+				{"base", got.Base, twinR.Base, azR.Base},
+				{"272k tier", got.Tiers[0].TierRates, twinR.Tiers[0].TierRates, azR.Tiers[0].TierRates},
+			} {
+				if c.got.CacheCreation == nil || c.got.CacheCreation.Cmp(c.twin.CacheCreation) != 0 {
+					t.Errorf("%s %s %s: CacheCreation = %v; want the twin's %v", key, tier, c.what, c.got.CacheCreation, c.twin.CacheCreation)
+				}
+				if c.got.CacheRead == nil || c.got.CacheRead.Cmp(c.twin.CacheRead) != 0 {
+					t.Errorf("%s %s %s: CacheRead = %v; want the twin's %v", key, tier, c.what, c.got.CacheRead, c.twin.CacheRead)
+				}
+				// Slots Azure publishes are its own and must survive untouched —
+				// the twin's cheaper input and output must never displace them.
+				if c.got.Input.Cmp(c.original.Input) != 0 {
+					t.Errorf("%s %s %s: Input = %v; want Azure's own %v", key, tier, c.what, c.got.Input, c.original.Input)
+				}
+				if c.got.Output.Cmp(c.original.Output) != 0 {
+					t.Errorf("%s %s %s: Output = %v; want Azure's own %v", key, tier, c.what, c.got.Output, c.original.Output)
+				}
+			}
 		}
-		if twinR.Base.CacheCreation == nil || azR.Base.CacheCreation.Cmp(twinR.Base.CacheCreation) != 0 {
-			t.Errorf("%s: CacheCreation %v != twin CacheCreation %v", tc.azure, azR.Base.CacheCreation, twinR.Base.CacheCreation)
+	}
+	// A slot neither side publishes stays nil rather than being invented.
+	if got := models["azure/gpt-5.6-sol"][TierStandard].Base.CacheCreation1h; got != nil {
+		t.Errorf("CacheCreation1h = %v; want nil — neither entry publishes a 1h cache-write rate", got)
+	}
+}
+
+// TestAzureCacheWriteRateRatio pins what the vendored snapshot must carry for
+// the Azure GPT-5.6 family: a non-nil cache-write rate at 1.25× that same
+// rate-set's input rate, at the base level, at every context-window tier, and
+// at every service tier the entry defines.
+//
+// 1.25× input is the ratio OpenAI publishes for cache writes, and Azure
+// applies it to its own (data-zone-premium) input rate rather than the direct
+// OpenAI one — so this holds across azure/, azure/us/, and azure/eu/ without
+// restating 36 literals. A nil rate means Azure cache writes bill $0; a
+// different ratio means upstream changed the pricing model. Either demands
+// review against upstream before the sync merges.
+func TestAzureCacheWriteRateRatio(t *testing.T) {
+	want := big.NewRat(5, 4)
+	for _, model := range []string{"gpt-5.6", "gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra"} {
+		for _, zone := range []string{"azure/", "azure/us/", "azure/eu/"} {
+			key := zone + model
+			for _, tier := range []ServiceTier{TierStandard, TierFlex, TierPriority} {
+				r, ok := RatesFor(key, tier)
+				if !ok {
+					continue // the entry does not define this service tier
+				}
+				type labeled struct {
+					what string
+					TierRates
+				}
+				rates := []labeled{{"base", r.Base}}
+				for _, ct := range r.Tiers {
+					rates = append(rates, labeled{fmt.Sprintf("above %d", ct.AbovePromptTokens), ct.TierRates})
+				}
+				for _, tr := range rates {
+					if tr.CacheCreation == nil {
+						t.Errorf("%s %s %s: CacheCreation is nil — cache writes would bill $0", key, tier, tr.what)
+						continue
+					}
+					if got := new(big.Rat).Quo(tr.CacheCreation, tr.Input); got.Cmp(want) != 0 {
+						t.Errorf("%s %s %s: CacheCreation/Input = %v; want %v", key, tier, tr.what, got, want)
+					}
+				}
+			}
 		}
 	}
 }
 
-// TestAzureCacheWriteTieredBackfill encodes that the cache-write backfill
-// extends to context-window tiers: the Azure entry's 272k tier must inherit
-// the twin's tiered cache-creation rate, not just the base rate. Without this,
-// a >272k-prompt Azure request bills cache writes at $0 even when the base
-// rate is backfilled.
-func TestAzureCacheWriteTieredBackfill(t *testing.T) {
-	azR, azOK := RatesFor("azure/gpt-5.6-sol", TierStandard)
-	twinR, twinOK := RatesFor("gpt-5.6-sol", TierStandard)
-	if !azOK || !twinOK {
-		t.Fatal("azure or twin did not resolve")
-	}
-	// Both must have the 272k context-window tier.
-	azTier := tierByThreshold(azR.Tiers, 272000)
-	twinTier := tierByThreshold(twinR.Tiers, 272000)
-	if azTier == nil || twinTier == nil {
-		t.Fatalf("272k tier missing: azure=%v, twin=%v", azTier != nil, twinTier != nil)
-	}
-	if azTier.CacheCreation == nil {
-		t.Fatal("azure 272k tier CacheCreation is nil after backfill")
-	}
-	// 1e-5 = 1/100,000
-	want := big.NewRat(1, 100_000)
-	if azTier.CacheCreation.Cmp(want) != 0 {
-		t.Errorf("azure 272k tier CacheCreation = %v; want %v", azTier.CacheCreation, want)
-	}
-	if twinTier.CacheCreation == nil || azTier.CacheCreation.Cmp(twinTier.CacheCreation) != 0 {
-		t.Errorf("azure 272k CacheCreation %v != twin %v", azTier.CacheCreation, twinTier.CacheCreation)
-	}
-}
-
-// TestAzureCacheWriteServiceTierBackfill encodes that the backfill covers
-// every service tier the Azure entry defines. Azure gpt-5.6-sol defines a
-// priority tier; its cache-creation rates must inherit from the OpenAI twin's
-// priority tier.
-func TestAzureCacheWriteServiceTierBackfill(t *testing.T) {
-	azR, azOK := RatesFor("azure/gpt-5.6-sol", TierPriority)
-	twinR, twinOK := RatesFor("gpt-5.6-sol", TierPriority)
-	if !azOK || !twinOK {
-		t.Skipf("priority tier not present: azure ok=%v, twin ok=%v", azOK, twinOK)
-	}
-	if azR.Base.CacheCreation == nil {
-		t.Fatal("azure priority CacheCreation is nil after backfill")
-	}
-	if twinR.Base.CacheCreation == nil || azR.Base.CacheCreation.Cmp(twinR.Base.CacheCreation) != 0 {
-		t.Errorf("azure priority CacheCreation %v != twin %v", azR.Base.CacheCreation, twinR.Base.CacheCreation)
+// TestAzureBackfillAppliedToVendoredData encodes that the backfill is wired
+// into table construction, not merely implemented: over the whole snapshot, no
+// Azure entry may leave a rate slot nil where its OpenAI twin publishes one —
+// at the base level or at any matching context-window tier, on every service
+// tier both define. A nil slot is not a $0 bill but a refusal to price, so
+// every such gap is Azure traffic llmcost silently declines to cost.
+//
+// At 828d561f the gaps upstream still leaves are cache-read rates on three
+// gpt-4o keys. If a future sync ever publishes every Azure rate this assertion
+// goes vacuous; TestAzureCacheWriteBackfill covers the mechanism itself on
+// constructed rates and does not.
+func TestAzureBackfillAppliedToVendoredData(t *testing.T) {
+	for key, tiers := range table() {
+		twinTiers, ok := table()[azureOpenAITwin(key)]
+		if !ok || !ProviderAzure.owns(tiers[TierStandard].litellmProvider) || !ProviderOpenAI.owns(twinTiers[TierStandard].litellmProvider) {
+			continue
+		}
+		for tier, r := range tiers {
+			twinR, ok := twinTiers[tier]
+			if !ok {
+				continue
+			}
+			check := func(what string, got, want TierRates) {
+				for _, f := range []struct {
+					name      string
+					got, want *big.Rat
+				}{
+					{"Input", got.Input, want.Input},
+					{"CacheRead", got.CacheRead, want.CacheRead},
+					{"CacheCreation", got.CacheCreation, want.CacheCreation},
+					{"CacheCreation1h", got.CacheCreation1h, want.CacheCreation1h},
+					{"Output", got.Output, want.Output},
+				} {
+					if f.got == nil && f.want != nil {
+						t.Errorf("%s %s %s: %s is nil while the twin publishes %v — backfill not applied", key, tier, what, f.name, f.want)
+					}
+				}
+			}
+			check("base", r.Base, twinR.Base)
+			for _, ct := range r.Tiers {
+				if tt := tierByThreshold(twinR.Tiers, ct.AbovePromptTokens); tt != nil {
+					check(fmt.Sprintf("above %d", ct.AbovePromptTokens), ct.TierRates, *tt)
+				}
+			}
+		}
 	}
 }
 
