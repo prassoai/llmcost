@@ -25,7 +25,7 @@ cost, ok := llmcost.Cost("claude-opus-4-8", llmcost.ClaudeUsage{
     CacheCreationInputTokens:   3000,  // usage.cache_creation_input_tokens — TOTAL writes, both TTLs
     CacheCreation1hInputTokens: 1000,  // usage.cache_creation.ephemeral_1h_input_tokens — 1h subset
     OutputTokens:               800,   // usage.output_tokens
-    Speed:                      "",    // the REQUEST's speed param — "fast" bills the 2×–6× fast premium
+    Speed:                      "",    // the REQUEST's speed param — "fast" bills the model's fast premium (2× today)
     InferenceGeo:               "",    // usage.inference_geo — a pinned region bills its premium (us: 1.1×)
 })
 ```
@@ -105,11 +105,13 @@ modeled.
   components inherit the priced service tier's base rates — never another
   service tier's.
 - **Price multipliers, no silent standard rates.** Anthropic's fast mode
-  (`speed: "fast"`, ×6 on opus-4-6/4-7, ×2 on opus-4-8) and pinned-region
+  (`speed: "fast"`, ×2 on opus-4-8 and opus-5 — LiteLLM carried ×6 for
+  opus-4-6/4-7 and retired it) and pinned-region
   inference (`usage.inference_geo`, ×1.1 for `us`) multiply uncached input
   and output — cache traffic is never scaled — and compose multiplicatively.
-  A mode the model has no factor for *fails* to price: a fast premium is up
-  to 6×, so billing standard rates on a data lag is a silent 6× underbill.
+  A mode the model has no factor for *fails* to price: fast premiums have
+  reached 6×, so billing standard rates on a data lag is a silent
+  multiple-× underbill.
   OpenAI's data residency (`eu.`/`us.api.openai.com`) uplifts **every**
   component including cache reads (×1.1 on gpt-5.4/5.5); models OpenAI
   doesn't regionally price bill standard, as in LiteLLM. Fireworks has
