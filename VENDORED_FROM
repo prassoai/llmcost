@@ -5,4 +5,4 @@
 #     "https://raw.githubusercontent.com/BerriAI/litellm/<sha>/model_prices_and_context_window.json"
 # and run go test ./... (the validation gate). The weekly sync workflow
 # (.github/workflows/sync.yml) does this automatically.
-commit: 828d561fcc2704eaf90617be8cdc058fccbd8508
+commit: 51514b9123a6569a0857bd7e941726c16def9bd2
