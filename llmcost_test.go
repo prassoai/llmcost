@@ -819,6 +819,25 @@ func TestVendoredDataCanaries(t *testing.T) {
 		r.Base.CacheRead == nil || r.Base.CacheRead.Cmp(big.NewRat(25, 100_000_000)) != 0 {
 		t.Errorf("claude-fable-5-1 rates = %+v; want $10/M in, $50/M out, $12.50/M cache write, $0.25/M cache read", r.Base)
 	}
+	// gpt-6-astra arrived at 51514b91 at $10/M input, $50/M output, $1/M cache
+	// read, $12.50/M cache write — exactly 2.5× gpt-5.6-sol on every component
+	// — with the same 272k long-context tier and flex/priority variants. A
+	// consumer that serves it as a codex model pins its priceability at every
+	// tier; this canary pins the rates themselves so a sync that shifts one
+	// fails here rather than silently rebilling every Astra turn.
+	if r, ok := RatesFor("gpt-6-astra", TierStandard); !ok ||
+		r.Base.Input.Cmp(big.NewRat(10, 1_000_000)) != 0 ||
+		r.Base.Output.Cmp(big.NewRat(50, 1_000_000)) != 0 ||
+		r.Base.CacheRead == nil || r.Base.CacheRead.Cmp(big.NewRat(1, 1_000_000)) != 0 ||
+		r.Base.CacheCreation == nil || r.Base.CacheCreation.Cmp(big.NewRat(125, 10_000_000)) != 0 ||
+		!slices.ContainsFunc(r.Tiers, func(tier Tier) bool { return tier.AbovePromptTokens == 272000 }) {
+		t.Errorf("gpt-6-astra rates = %+v; want $10/M in, $50/M out, $1/M cache read, $12.50/M cache write, a 272k tier", r)
+	}
+	for _, tier := range []ServiceTier{TierFlex, TierPriority} {
+		if _, ok := RatesFor("gpt-6-astra", tier); !ok {
+			t.Errorf("gpt-6-astra at %s no longer resolves", tier)
+		}
+	}
 	if r, ok := RatesFor("gpt-5.4", TierStandard); !ok || r.RegionalUplift["eu"] == nil || r.RegionalUplift["us"] == nil {
 		t.Errorf("gpt-5.4 regional uplifts = %v; want eu and us factors", r.RegionalUplift)
 	}
@@ -1055,7 +1074,7 @@ func TestAzureCacheWriteBackfill(t *testing.T) {
 // review against upstream before the sync merges.
 func TestAzureCacheWriteRateRatio(t *testing.T) {
 	want := big.NewRat(5, 4)
-	for _, model := range []string{"gpt-5.6", "gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra"} {
+	for _, model := range []string{"gpt-5.6", "gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-6-astra"} {
 		for _, zone := range []string{"azure/", "azure/us/", "azure/eu/"} {
 			key := zone + model
 			for _, tier := range []ServiceTier{TierStandard, TierFlex, TierPriority} {
