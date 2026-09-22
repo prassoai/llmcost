@@ -1155,10 +1155,10 @@ func TestAzureBackfillAppliedToVendoredData(t *testing.T) {
 // TestAzureCacheWriteCostMatchesTwin encodes the billing requirement end to
 // end: an Azure gpt-5.6 cache-write-heavy response must actually price cache
 // writes — the cost must be strictly greater than the cost without cache
-// writes. Azure GPT-5.6-sol/gpt-5.6 now carry their own base rates (25% more
-// on input, etc.), so global Azure keys no longer match the OpenAI twin
-// exactly; luna and terra still do. All variants — global and data-zone — must
-// price cache writes (cost with writes > cost without).
+// writes. The global Azure GPT-5.6 keys match their OpenAI twins rate for
+// rate; the data-zone keys (azure/us/, azure/eu/) carry a ~10% premium and do
+// not. All variants — global and data-zone — must price cache writes (cost
+// with writes > cost without).
 func TestAzureCacheWriteCostMatchesTwin(t *testing.T) {
 	withWrites := OpenAIUsage{InputTokens: 10000, CachedInputTokens: 2000, CacheWriteTokens: 5000, OutputTokens: 1000}
 	noWrites := OpenAIUsage{InputTokens: 5000, CachedInputTokens: 2000, OutputTokens: 1000}
@@ -1195,34 +1195,84 @@ func TestAzureCacheWriteCostMatchesTwin(t *testing.T) {
 	}
 }
 
-// TestAzureBackfillPreservesExistingRates encodes that the backfill never
-// overwrites a rate the Azure entry already has — it only fills nil slots.
-// Input, CacheRead, and Output are always populated on priceable Azure entries
-// and must remain unchanged. Since the d8d384eada9d snapshot, Azure GPT-5.6-sol
-// carries its own rates that differ from the OpenAI twin (25% premium on
-// input/cache-read, 50% on output); the test verifies the fields are non-nil
-// and hold the Azure-specific values.
+// TestAzureBackfillPreservesExistingRates encodes, across the whole vendored
+// snapshot, that the backfill never overwrites a rate the Azure entry already
+// publishes — it only fills nil slots. Azure prices its data zones above the
+// direct OpenAI entry (azure/us/ and azure/eu/ carry a ~10% premium), so a
+// backfill that let the twin displace a published rate would underbill every
+// request in those zones with nothing else in the data to notice.
+//
+// The expectation is the same embedded JSON the table is built from, parsed
+// but NOT backfilled, so it cannot go stale at a re-vendor the way a literal
+// rate can. The two counters keep it from going vacuous: `compared` proves
+// the sweep reached the snapshot's Azure entries, and `premium` proves at
+// least one compared rate differs from the twin's — without that, an
+// overwrite would be unobservable.
 func TestAzureBackfillPreservesExistingRates(t *testing.T) {
-	azR, azOK := RatesFor("azure/gpt-5.6-sol", TierStandard)
-	if !azOK {
-		t.Fatal("azure/gpt-5.6-sol did not resolve")
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(litellmJSON, &raw); err != nil {
+		t.Fatalf("parse embedded LiteLLM data: %v", err)
 	}
-	// Input, CacheRead, and Output must be non-nil (the backfill must not
-	// have zeroed them) and hold the Azure-specific rates from the snapshot.
-	for name, pair := range map[string]struct {
-		got  *big.Rat
-		want *big.Rat
-	}{
-		"Input":     {azR.Base.Input, big.NewRat(5, 1_000_000)},      // 5e-6
-		"CacheRead": {azR.Base.CacheRead, big.NewRat(5, 10_000_000)}, // 5e-7
-		"Output":    {azR.Base.Output, big.NewRat(3, 100_000)},       // 3e-5
-	} {
-		if pair.got == nil {
-			t.Errorf("%s is nil", name)
-		} else if pair.got.Cmp(pair.want) != 0 {
-			t.Errorf("%s: azure %v != expected %v", name, pair.got, pair.want)
+	compared, premium := 0, 0
+	for key, spec := range raw {
+		built, ok := table()[key]
+		if !ok || !ProviderAzure.owns(built[TierStandard].litellmProvider) {
+			continue
+		}
+		vendored, ok := parseModel(spec)
+		if !ok {
+			t.Errorf("%s: in the table but no longer parses as priceable", key)
+			continue
+		}
+		twin := table()[azureOpenAITwin(key)]
+		for tier, want := range vendored {
+			check := func(what string, got, want, twin TierRates) {
+				for _, f := range []struct {
+					name            string
+					got, want, twin *big.Rat
+				}{
+					{"Input", got.Input, want.Input, twin.Input},
+					{"CacheRead", got.CacheRead, want.CacheRead, twin.CacheRead},
+					{"CacheCreation", got.CacheCreation, want.CacheCreation, twin.CacheCreation},
+					{"CacheCreation1h", got.CacheCreation1h, want.CacheCreation1h, twin.CacheCreation1h},
+					{"Output", got.Output, want.Output, twin.Output},
+				} {
+					if f.want == nil {
+						continue // a nil slot is the backfill's to fill
+					}
+					compared++
+					if f.twin != nil && f.twin.Cmp(f.want) != 0 {
+						premium++
+					}
+					if f.got == nil || f.got.Cmp(f.want) != 0 {
+						t.Errorf("%s %s %s: %s = %v; want the vendored %v — the backfill overwrote a published rate",
+							key, tier, what, f.name, f.got, f.want)
+					}
+				}
+			}
+			check("base", built[tier].Base, want.Base, twin[tier].Base)
+			for i, ct := range want.Tiers {
+				check(fmt.Sprintf("above %d", ct.AbovePromptTokens), built[tier].Tiers[i].TierRates, ct.TierRates, tierRatesAt(twin[tier].Tiers, ct.AbovePromptTokens))
+			}
 		}
 	}
+	if compared < 500 {
+		t.Errorf("compared only %d published Azure rates — the sweep no longer reaches the snapshot", compared)
+	}
+	if premium == 0 {
+		t.Error("no Azure rate differs from its OpenAI twin — an overwrite would be invisible, so this test proves nothing")
+	}
+}
+
+// tierRatesAt returns the context-window tier rates at threshold, or the zero
+// value when the entry has no tier there.
+func tierRatesAt(tiers []Tier, threshold int64) TierRates {
+	for _, t := range tiers {
+		if t.AbovePromptTokens == threshold {
+			return t.TierRates
+		}
+	}
+	return TierRates{}
 }
 
 // TestAzureOpenAITwin encodes the key-stripping logic that maps Azure pricing

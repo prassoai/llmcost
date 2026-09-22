@@ -308,7 +308,12 @@ func nativeSelectorFor(p Provider, key, region string) ModelSelector {
 // demand-review moment for a new naming scheme. Stale exceptions fail too,
 // so the list can only shrink.
 func TestSelectorCanonicalVendorNames(t *testing.T) {
-	stripDate := regexp.MustCompile(`-\d{8}$`)
+	// A dated variant carries its date either way — Anthropic compact
+	// (claude-3-opus-20240229), OpenAI hyphenated (gpt-5.6-sol-2026-07-09) —
+	// and a family is the name with that suffix removed. A cloud may date a
+	// variant the vendor's own key set never lists, so both forms must strip
+	// or the family match fails and the key reads as a new naming scheme.
+	stripDate := regexp.MustCompile(`-(\d{8}|\d{4}-\d{2}-\d{2})$`)
 	directFamilies := map[string]bool{}
 	for key, tiers := range table() {
 		if lp := tiers[TierStandard].litellmProvider; ProviderOpenAI.owns(lp) || ProviderAnthropic.owns(lp) {
@@ -332,15 +337,18 @@ func TestSelectorCanonicalVendorNames(t *testing.T) {
 			"claude-3-sonnet", "claude-3-sonnet-20240229",
 			"gpt-oss-120b", "gpt-oss-20b",
 		),
-		ProviderAzureAI: setOf("gpt-oss-120b"),
+		// OpenAI lists the rolling ChatGPT model as "chat-latest"; Azure sells
+		// the same model, at the same rates, under an Azure-only "gpt-" prefix.
+		ProviderAzureAI: setOf("gpt-oss-120b", "gpt-chat-latest"),
 		// Azure-only OpenAI entries: models or dated variants OpenAI's direct
 		// key set no longer (or never) lists, still sold on Azure.
 		ProviderAzure: setOf(
 			"gpt-3.5-turbo-16k-0613", "gpt-4-32k", "gpt-4-32k-0613", "gpt-4-turbo-vision-preview",
-			"gpt-4.5-preview", "gpt-4o-realtime-preview-2024-10-01",
-			"gpt-5.1-chat", "gpt-5.1-chat-2025-11-13", "gpt-5.1-codex-2025-11-13", "gpt-5.1-codex-mini-2025-11-13",
+			"gpt-4.5-preview",
+			"gpt-5.1-chat", "gpt-5.1-chat-2025-11-13",
 			"gpt-5.2-chat", "gpt-5.2-chat-2025-12-11", "gpt-5.3-chat",
-			"gpt-audio-1.5-2026-02-23", "gpt-realtime-1.5-2026-02-23",
+			// See the azure_ai note above: "chat-latest" with an Azure-only prefix.
+			"gpt-chat-latest",
 		),
 	}
 	vendorModel := regexp.MustCompile(`claude|gpt`)
