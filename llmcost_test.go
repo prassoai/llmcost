@@ -807,6 +807,20 @@ func TestVendoredDataCanaries(t *testing.T) {
 		r.Fast == nil || r.Fast.Cmp(big.NewRat(2, 1)) != 0 || r.Geo["us"] == nil {
 		t.Errorf("claude-opus-5 rates = %+v (fast %v, geo %v); want $5/M in, $25/M out, fast 2, a us factor", r.Base, r.Fast, r.Geo)
 	}
+	// claude-opus-5-5 launched 2026-09-22 at $4/M input and $20/M output,
+	// with 5-minute cache writes at $5/M, 1-hour cache writes at $8/M, and cache
+	// reads at $0.20/M. It is the first direct Anthropic entry here with a 1M
+	// context window as the plain model id, so pin that the pricing key exists
+	// before consumers expose it in model pickers.
+	if r, ok := RatesFor("claude-opus-5-5", TierStandard); !ok ||
+		r.Base.Input.Cmp(big.NewRat(4, 1_000_000)) != 0 ||
+		r.Base.Output.Cmp(big.NewRat(20, 1_000_000)) != 0 ||
+		r.Base.CacheCreation == nil || r.Base.CacheCreation.Cmp(big.NewRat(5, 1_000_000)) != 0 ||
+		r.Base.CacheCreation1h == nil || r.Base.CacheCreation1h.Cmp(big.NewRat(8, 1_000_000)) != 0 ||
+		r.Base.CacheRead == nil || r.Base.CacheRead.Cmp(big.NewRat(20, 100_000_000)) != 0 ||
+		r.Fast == nil || r.Fast.Cmp(big.NewRat(2, 1)) != 0 {
+		t.Errorf("claude-opus-5-5 rates = %+v (fast %v); want $4/M in, $20/M out, $5/M cache write, $8/M 1h cache write, $0.20/M cache read, fast 2", r.Base, r.Fast)
+	}
 	// claude-fable-5-1 arrived at 828d561f at $10/M input, $50/M output,
 	// $12.50/M 5-minute cache write — and $0.25/M cache read, which is 2.5% of
 	// input where every other Anthropic model charges 10%. That outlier is the
