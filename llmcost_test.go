@@ -759,7 +759,9 @@ func TestTableInvariants(t *testing.T) {
 // model id THEY bill resolves, so a dropped model they depend on fails their
 // build, not silently bills zero.
 func TestVendoredDataCanaries(t *testing.T) {
-	for _, model := range []string{"claude-opus-5", "claude-opus-4-8", "claude-haiku-4-5", "gpt-5.4", "gpt-4o", "codex-mini-latest"} {
+	// The codex-line canary is gpt-5.1-codex-mini: OpenAI retired
+	// codex-mini-latest and upstream dropped the key with it.
+	for _, model := range []string{"claude-opus-5", "claude-opus-4-8", "claude-haiku-4-5", "gpt-5.4", "gpt-4o", "gpt-5.1-codex-mini"} {
 		if _, ok := RatesFor(model, TierStandard); !ok {
 			t.Errorf("canary %s no longer resolves", model)
 		}
