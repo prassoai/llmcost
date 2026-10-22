@@ -55,7 +55,7 @@ const (
 // DISJOINT counts:
 //
 //	InputTokens                = usage.input_tokens                — uncached input ONLY, excludes both cache fields
-//	CacheReadInputTokens       = usage.cache_read_input_tokens     — cache hits, billed at the cache-read rate (0.1× input)
+//	CacheReadInputTokens       = usage.cache_read_input_tokens     — cache hits, billed at the model's published cache-read rate
 //	CacheCreationInputTokens   = usage.cache_creation_input_tokens — TOTAL cache writes across both TTLs
 //	CacheCreation1hInputTokens = usage.cache_creation.ephemeral_1h_input_tokens — the 1-hour-TTL SUBSET of the total
 //	OutputTokens               = usage.output_tokens
