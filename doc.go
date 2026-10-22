@@ -118,15 +118,15 @@
 // # Price multipliers — fast mode, pinned geo, data residency
 //
 // Three request modes multiply the per-token rates; each is priced exactly
-// as LiteLLM's calculator prices it from the same data.
+// using the published provider multipliers.
 //
 // Anthropic's fast mode (request speed:"fast") bills uncached input and
 // output at the model's fast multiplier — 2× on claude-opus-4-8 and
 // claude-opus-5, the models the vendored snapshot fast-prices; LiteLLM
 // carried 6× for opus-4-6/4-7 and retired it — and Anthropic's pinned-region
 // inference (usage.inference_geo, e.g. "us") at the model's geo multiplier
-// (1.1×). The two compose multiplicatively; cache reads and writes bill
-// UNSCALED in both modes. A fast response on a model without fast pricing, a
+// (1.1×). The two compose multiplicatively; the geo multiplier also
+// applies to cache reads and writes. A fast response on a model without fast pricing, a
 // pinned geo without a factor, or an unrecognized Speed value fails to price:
 // these premiums have reached 6×, so billing standard rates on a pricing-data
 // lag is exactly the silent underbill this module exists to prevent. The

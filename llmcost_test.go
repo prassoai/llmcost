@@ -752,7 +752,7 @@ func TestTableInvariants(t *testing.T) {
 
 // TestVendoredDataCanaries pins known shapes of the vendored data: a handful
 // of stable LiteLLM keys must resolve, and the long-context tiers known to
-// exist — claude-sonnet-4-5's 200k (the 1M-context beta) and gpt-5.4's 272k —
+// exist — claude-haiku-5-5's 100k and gpt-5.4's 272k —
 // must be parsed. If this fails after a sync, either upstream restructured
 // its schema (fix parseModel) or the canary models' pricing genuinely
 // vanished (verify before merging). Consumers separately test that every
@@ -766,7 +766,7 @@ func TestVendoredDataCanaries(t *testing.T) {
 			t.Errorf("canary %s no longer resolves", model)
 		}
 	}
-	for model, want := range map[string]int64{"claude-sonnet-4-5": 200000, "gpt-5.4": 272000} {
+	for model, want := range map[string]int64{"claude-haiku-5-5": 100000, "gpt-5.4": 272000} {
 		r, ok := RatesFor(model, TierStandard)
 		if !ok {
 			t.Errorf("%s no longer resolves", model)

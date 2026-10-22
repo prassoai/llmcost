@@ -209,7 +209,7 @@ type Tier struct {
 // provider_specific_entry: Fast scales uncached input and output when the
 // request ran with speed "fast" (2×–6× depending on the model), Geo maps a
 // pinned inference region (lowercased, e.g. "us") to its multiplier (1.1×).
-// Cache reads and writes are never scaled by either. RegionalUplift maps an
+// Geo also scales cache reads and writes. RegionalUplift maps an
 // OpenAI data-residency region ("eu", "us") to the model's
 // regional_processing_uplift_multiplier_<region>, a flat uplift on ALL token
 // costs — cache included — for requests served by a regionalized host. Nil
@@ -308,13 +308,13 @@ func (u ClaudeUsage) disjoint() components {
 }
 
 // premium composes the fast-mode and pinned-geo multipliers, which scale
-// uncached input and output only — Anthropic bills cache reads and writes at
-// their normal rates in both modes, and LiteLLM's calculator excludes cache
-// costs from these multipliers the same way. "global" and "not_available"
+// uncached input and output. Pinned geography also scales cache costs.
+// "global" and "not_available"
 // are the API's unpinned geos and never carry a premium; any other geo, and
 // speed "fast", require a factor in the model's rates and fail without one.
 func (u ClaudeUsage) premium(r Rates) (premium, bool) {
 	m := big.NewRat(1, 1)
+	var cache *big.Rat
 	switch u.Speed {
 	case "", "standard":
 	case "fast":
@@ -333,11 +333,12 @@ func (u ClaudeUsage) premium(r Rates) (premium, bool) {
 			return premium{}, false
 		}
 		m.Mul(m, f)
+		cache = f
 	}
 	if m.Cmp(big.NewRat(1, 1)) == 0 {
 		return premium{}, true
 	}
-	return premium{tokens: m}, true
+	return premium{tokens: m, cache: cache}, true
 }
 
 // tier is always standard: Anthropic has no service tiers — its per-request

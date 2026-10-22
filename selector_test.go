@@ -341,7 +341,8 @@ func TestSelectorCanonicalVendorNames(t *testing.T) {
 		),
 		// OpenAI lists the rolling ChatGPT model as "chat-latest"; Azure sells
 		// the same model, at the same rates, under an Azure-only "gpt-" prefix.
-		ProviderAzureAI: setOf("gpt-oss-120b", "gpt-chat-latest"),
+		// Foundry publishes Opus fast mode as a separate deployment name.
+		ProviderAzureAI: setOf("gpt-oss-120b", "gpt-chat-latest", "claude-opus-5-5-fast"),
 		// Azure-only OpenAI entries: models or dated variants OpenAI's direct
 		// key set no longer (or never) lists, still sold on Azure.
 		ProviderAzure: setOf(

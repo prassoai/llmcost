@@ -149,18 +149,18 @@ func TestOverrideNewModel(t *testing.T) {
 // This replaces the old FlattenTiers flag with a simpler mechanism:
 // the override controls the rate structure directly.
 func TestOverrideFlattensTiersByOmission(t *testing.T) {
-	// Read the snapshot's base rates for claude-sonnet-4-5 and reproduce
+	// Read the snapshot's base rates for claude-haiku-5-5 and reproduce
 	// them as an override WITHOUT context-window tiers.
-	snap, ok := RatesFor("claude-sonnet-4-5", TierStandard)
+	snap, ok := RatesFor("claude-haiku-5-5", TierStandard)
 	if !ok {
 		t.Fatal("snapshot model not found")
 	}
 	if len(snap.Tiers) == 0 {
-		t.Fatal("test assumes claude-sonnet-4-5 has context-window tiers")
+		t.Fatal("test assumes claude-haiku-5-5 has context-window tiers")
 	}
 	tbl := New(Config{
 		Overrides: map[string]*Rates{
-			"claude-sonnet-4-5": {
+			"claude-haiku-5-5": {
 				Base: snap.Base,
 				// Tiers intentionally omitted — flat pricing.
 			},
@@ -168,10 +168,10 @@ func TestOverrideFlattensTiersByOmission(t *testing.T) {
 	})
 
 	// 300k total prompt (250k input + 50k cache read) would exceed the
-	// snapshot's 200k tier. With the flat override, base rates apply.
+	// snapshot's 100k tier. With the flat override, base rates apply.
 	u := ClaudeUsage{InputTokens: 250000, CacheReadInputTokens: 50000, OutputTokens: 1000}
-	flatCost, flatOK := tbl.Cost("claude-sonnet-4-5", u)
-	snapCost, snapOK := Cost("claude-sonnet-4-5", u)
+	flatCost, flatOK := tbl.Cost("claude-haiku-5-5", u)
+	snapCost, snapOK := Cost("claude-haiku-5-5", u)
 	if !flatOK || !snapOK {
 		t.Fatalf("flat ok=%v, snap ok=%v; want both true", flatOK, snapOK)
 	}
@@ -180,7 +180,7 @@ func TestOverrideFlattensTiersByOmission(t *testing.T) {
 	}
 
 	// The override's RatesFor must have nil Tiers.
-	r, ok := tbl.RatesFor("claude-sonnet-4-5", TierStandard)
+	r, ok := tbl.RatesFor("claude-haiku-5-5", TierStandard)
 	if !ok {
 		t.Fatal("RatesFor flat override failed")
 	}
@@ -224,13 +224,11 @@ func TestOverrideWithMultipliers(t *testing.T) {
 		t.Fatalf("fast = %d, %v; want 7250, true", got, ok)
 	}
 
-	// Geo (us, 1.1×): uncached input and output ×1.1, cache unscaled.
-	// (1000×5e-6 + 100×25e-6) × 1.1 + 30000×5e-7 + 2000×6.25e-6
-	// = 0.0075 × 1.1 + 0.0275 = 0.00825 + 0.0275 = $0.03575 = 3575 nls
+	// Geo (us, 1.1×) scales all token costs: 3500 × 1.1 = 3850 nls.
 	u.Speed = ""
 	u.InferenceGeo = "us"
-	if got, ok := tbl.Cost("custom-with-mult", u); !ok || got != 3575 {
-		t.Fatalf("geo us = %d, %v; want 3575, true", got, ok)
+	if got, ok := tbl.Cost("custom-with-mult", u); !ok || got != 3850 {
+		t.Fatalf("geo us = %d, %v; want 3850, true", got, ok)
 	}
 }
 
