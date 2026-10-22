@@ -583,3 +583,38 @@ func TestConcurrentCost(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// TestCancellingMultipliersPreserveCacheGeo requires custom fast and geo
+// factors that multiply to one to retain the independent cache discount.
+// Cache reads and both write TTLs still bill the geo factor on these requests.
+func TestCancellingMultipliersPreserveCacheGeo(t *testing.T) {
+	tbl := New(Config{Overrides: map[string]*Rates{
+		"cancelled": {
+			Base: TierRates{
+				Input: MustParseRat("1e-5"), Output: MustParseRat("1e-5"),
+				CacheRead: MustParseRat("1e-5"), CacheCreation: MustParseRat("1e-5"),
+				CacheCreation1h: MustParseRat("1e-5"),
+			},
+			Fast: MustParseRat("2"), Geo: map[string]*big.Rat{"us": MustParseRat("0.5")},
+		},
+	}})
+	for _, tt := range []struct {
+		name  string
+		usage ClaudeUsage
+		want  Nls
+	}{
+		{"input", ClaudeUsage{InputTokens: 100}, 100},
+		{"output", ClaudeUsage{OutputTokens: 100}, 100},
+		{"cache read", ClaudeUsage{CacheReadInputTokens: 100}, 50},
+		{"5m cache write", ClaudeUsage{CacheCreationInputTokens: 100}, 50},
+		{"1h cache write", ClaudeUsage{CacheCreationInputTokens: 100, CacheCreation1hInputTokens: 100}, 50},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			u := tt.usage
+			u.Speed, u.InferenceGeo = "fast", "us"
+			if got, ok := tbl.Cost("cancelled", u); !ok || got != tt.want {
+				t.Fatalf("Cost = %d, %v; want %d, true", got, ok, tt.want)
+			}
+		})
+	}
+}

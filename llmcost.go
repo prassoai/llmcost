@@ -335,9 +335,6 @@ func (u ClaudeUsage) premium(r Rates) (premium, bool) {
 		m.Mul(m, f)
 		cache = f
 	}
-	if m.Cmp(big.NewRat(1, 1)) == 0 {
-		return premium{}, true
-	}
 	return premium{tokens: m, cache: cache}, true
 }
 
