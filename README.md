@@ -167,9 +167,11 @@ v := listprice.CurrentVersion()                // "v0.5.0+litellm.1a2b3c4d"
 
 `listprice/published.go` curates the models sold by name — product id to
 llmcost key — and overrides for rates LiteLLM lacks or gets wrong.
-`listprice.Book()` enumerates the rate card, exact USD per million tokens,
-cost and price side by side, for price pages and audit tables. See
-`docs/finished/DESIGN_LIST_PRICE.md`.
+`listprice.Book()` enumerates the rate card, exact USD per million tokens:
+one price per model whichever provider serves it, beside the cost of the
+provider that sets it. `listprice.Costs()` enumerates every provider's cost
+for those models — Bedrock, Vertex AI, Azure and Fireworks included — for
+audit tables. See `docs/finished/DESIGN_LIST_PRICE.md`.
 
 ## Vendored data
 

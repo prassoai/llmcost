@@ -69,7 +69,7 @@ type row struct {
 	Cost *big.Rat `json:"cost"`
 }
 
-// key identifies a rate. It includes the provider, so a model moving to
+// key identifies a rate. It includes the pricing provider, so a model moving to
 // another provider is a removal, never an unchanged rate.
 type key struct {
 	provider, model, tier, component string
@@ -82,7 +82,7 @@ func (r row) key() key { return key{r.Provider, r.Model, r.Tier, r.Component, r.
 func rows(book []listprice.Rate) []row {
 	out := make([]row, len(book))
 	for i, r := range book {
-		out[i] = row{string(r.Provider), r.Model, r.Published, string(r.Tier), r.Fast, r.AbovePromptTokens, r.Component.String(), r.Cost}
+		out[i] = row{string(r.PricedBy), r.Model, r.Published, string(r.Tier), r.Fast, r.AbovePromptTokens, r.Component.String(), r.Cost}
 	}
 	return out
 }

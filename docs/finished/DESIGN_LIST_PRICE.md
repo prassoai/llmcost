@@ -16,10 +16,16 @@ The full design is murmuration's
 - **`listprice/published.go`** — the curated models sold by name (product id
   → llmcost key, which is where aliases live) and rate overrides. Every entry
   must price at the standard tier; CI enforces it.
-- **`listprice.Book()`** — the rate card as exact USD per million tokens, cost
-  and price per model, service tier, speed, context tier and component.
-  Consumers render the public price page and the cost-vs-price audit table
-  from it.
+- **`listprice.Book()`** — the rate card as exact USD per million tokens: one
+  list price per model, service tier, speed, context tier and component,
+  whichever provider serves the model. Each rate names the provider whose
+  cost sets it (`PricedBy`: Anthropic for Claude, OpenAI for GPT) and carries
+  that cost beside the price.
+- **`listprice.Costs()`** — what each provider charges for the book's models:
+  the pricing provider and every cloud that serves the model under its own
+  key (Bedrock, Vertex AI, Azure, Azure AI Foundry, Fireworks), resolved
+  through `ModelSelector`. Consumers render the public price page from
+  `Book()` and the cost-vs-price audit table from both.
 - **`Models(provider)`, `LiteLLMCommit()`** — enumeration and provenance the
   book needs from the root package.
 - **Daily refresh** — `sync.yml` runs daily; `cmd/pricediff` classifies each

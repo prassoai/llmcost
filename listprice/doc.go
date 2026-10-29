@@ -25,7 +25,10 @@
 // The book publishes a curated set of models by name, each mapped to the
 // llmcost key that prices it. [Book] enumerates the rate card — published
 // models first, then every other first-party key llmcost prices — as exact
-// USD per million tokens, cost and list price side by side.
+// USD per million tokens. A model has one list price whichever provider
+// serves it, set by the cost of its pricing provider ([Rate.PricedBy]). [Costs]
+// enumerates what each provider charges for the same models, so a price can
+// be read beside every cost it could be served at.
 //
 // # Versioning
 //

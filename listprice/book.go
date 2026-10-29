@@ -37,20 +37,19 @@ func (c Component) String() string {
 	return fmt.Sprintf("Component(%d)", c)
 }
 
-// Rate is one price-book row: what the provider charges per million tokens of
-// one component, and the list price, for one model at one service tier,
-// speed and context tier.
+// Rate is one list price: what murmur charges per million tokens of one
+// component, for one model at one service tier, speed and context tier. A
+// model has one price whichever provider serves it: the price is set by
+// PricedBy's cost, and every provider's own cost is a [ProviderCost].
 type Rate struct {
-	Provider llmcost.Provider
 	// Model is the id the model is requested under: a published model's id,
 	// otherwise its llmcost key.
 	Model string
-	Key   string
 	// Published marks the curated set of models sold by name.
 	Published bool
-	// Source is [SourceLLMCost] or [SourceOverride].
-	Source Source
-	Tier   llmcost.ServiceTier
+	// PricedBy is the provider whose listed cost sets the price.
+	PricedBy llmcost.Provider
+	Tier     llmcost.ServiceTier
 	// Fast is Anthropic's fast mode: input and output carry the model's fast
 	// multiplier, cache components bill unscaled.
 	Fast bool
@@ -58,33 +57,73 @@ type Rate struct {
 	// whose total prompt exceeds it. 0 is the base tier.
 	AbovePromptTokens int64
 	Component         Component
-	// Cost and Price are exact USD per million tokens; Price is Cost with
-	// [MarkupBasisPoints] applied, unrounded.
+	// Cost is PricedBy's cost and Price is Cost with [MarkupBasisPoints]
+	// applied, unrounded; both are exact USD per million tokens.
 	Cost, Price *big.Rat
 }
 
-// Book enumerates the price book, ordered by provider, then the published
-// models in their curated order, then every other priceable key sorted. Each
-// model contributes a row per service tier, speed, context tier and priced
-// component. It covers everything [Of] prices at a base inference geo, so
-// a model it lists no rate for has no list price.
+// ProviderCost is what one provider charges per million tokens of one
+// component, for one book model at one service tier, speed and context tier.
+type ProviderCost struct {
+	Provider llmcost.Provider
+	// Model is the book model, as [Rate.Model] names it; Key is the
+	// provider's llmcost key for it.
+	Model, Key string
+	// Source is [SourceLLMCost] or [SourceOverride].
+	Source            Source
+	Tier              llmcost.ServiceTier
+	Fast              bool
+	AbovePromptTokens int64
+	Component         Component
+	// Cost is exact USD per million tokens.
+	Cost *big.Rat
+}
+
+// Book enumerates the list prices, ordered by pricing provider, then the
+// published models in their curated order, then every other priceable key
+// sorted. Each model contributes a row per service tier, speed, context tier
+// and priced component. It covers everything [Of] prices at a base inference
+// geo, so a model it lists no rate for has no list price.
 func Book() []Rate { return std.rates() }
 
-// providers are the first-party providers the book lists, in order.
-var providers = []llmcost.Provider{llmcost.ProviderAnthropic, llmcost.ProviderOpenAI}
+// Costs enumerates what every provider llmcost prices charges for the book's
+// models, in [Book]'s model order and, per model, its pricing provider first.
+// A provider appears for a model when its global (unregioned) key for the
+// model resolves: [llmcost.ModelSelector] maps the pricing key's vendor name
+// onto each cloud's own naming.
+func Costs() []ProviderCost { return std.costs() }
+
+// pricers are the providers whose models the book prices, in order.
+var pricers = []llmcost.Provider{llmcost.ProviderAnthropic, llmcost.ProviderOpenAI}
+
+// costers are the providers [Costs] reports, in order. Regional keys (Azure
+// data zones, Bedrock geo profiles) are left out: each is its global key plus
+// a premium.
+var costers = []llmcost.Provider{
+	llmcost.ProviderAnthropic, llmcost.ProviderOpenAI, llmcost.ProviderBedrock, llmcost.ProviderVertexAI,
+	llmcost.ProviderAzure, llmcost.ProviderAzureAI, llmcost.ProviderFireworks,
+}
 
 var (
 	perMillion = big.NewRat(1_000_000, 1)
 	markup     = big.NewRat(10_000+MarkupBasisPoints, 10_000)
 )
 
-func (b *book) rates() []Rate {
-	var out []Rate
-	for _, p := range providers {
+// entry is one book model: the id it is requested under, the key its pricing
+// provider bills it by, and whether it is published.
+type entry struct {
+	model
+	published bool
+}
+
+// entries lists the book's models in [Book] order.
+func (b *book) entries() []entry {
+	var out []entry
+	for _, p := range pricers {
 		covered := map[string]bool{}
 		for _, m := range b.published {
 			if m.provider == p {
-				out = append(out, b.rows(p, m.id, m.key, true)...)
+				out = append(out, entry{m, true})
 				covered[m.key] = true
 			}
 		}
@@ -97,15 +136,47 @@ func (b *book) rates() []Rate {
 		slices.Sort(keys)
 		for _, k := range keys {
 			if !covered[k] {
-				out = append(out, b.rows(p, k, k, false)...)
+				out = append(out, entry{model{k, k, p}, false})
 			}
 		}
 	}
 	return out
 }
 
-func (b *book) rows(p llmcost.Provider, model, key string, published bool) []Rate {
+func (b *book) rates() []Rate {
 	var out []Rate
+	for _, e := range b.entries() {
+		for _, c := range b.priced(e.provider, e.id, e.key) {
+			out = append(out, Rate{
+				Model: e.id, Published: e.published, PricedBy: e.provider,
+				Tier: c.Tier, Fast: c.Fast, AbovePromptTokens: c.AbovePromptTokens, Component: c.Component,
+				Cost: c.Cost, Price: new(big.Rat).Mul(c.Cost, markup),
+			})
+		}
+	}
+	return out
+}
+
+func (b *book) costs() []ProviderCost {
+	var out []ProviderCost
+	for _, e := range b.entries() {
+		out = append(out, b.priced(e.provider, e.id, e.key)...)
+		for _, p := range costers {
+			if p == e.provider {
+				continue
+			}
+			if key, ok := (llmcost.ModelSelector{Provider: p, Model: e.key}).Key(); ok {
+				out = append(out, b.priced(p, e.id, key)...)
+			}
+		}
+	}
+	return out
+}
+
+// priced lists provider p's costs for model, billed by key, at every service
+// tier, speed, context tier and component key prices.
+func (b *book) priced(p llmcost.Provider, model, key string) []ProviderCost {
+	var out []ProviderCost
 	for _, tier := range []llmcost.ServiceTier{llmcost.TierStandard, llmcost.TierFlex, llmcost.TierPriority} {
 		r, ok := b.table.RatesFor(key, tier)
 		if !ok {
@@ -136,10 +207,10 @@ func (b *book) rows(p llmcost.Provider, model, key string, published bool) []Rat
 					if fast != nil && c.scaled {
 						cost.Mul(cost, fast)
 					}
-					out = append(out, Rate{
-						Provider: p, Model: model, Key: key, Published: published, Source: b.source(key),
+					out = append(out, ProviderCost{
+						Provider: p, Model: model, Key: key, Source: b.source(key),
 						Tier: tier, Fast: fast != nil, AbovePromptTokens: t.AbovePromptTokens, Component: c.component,
-						Cost: cost, Price: new(big.Rat).Mul(cost, markup),
+						Cost: cost,
 					})
 				}
 			}

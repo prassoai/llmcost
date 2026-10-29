@@ -2,6 +2,7 @@ package listprice
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/prassoai/llmcost"
 )
@@ -39,7 +40,7 @@ func newBook(published []model, overrides map[string]override) *book {
 		switch {
 		case seen[m.id]:
 			panic(fmt.Sprintf("listprice: model %q is published twice", m.id))
-		case m.provider != llmcost.ProviderAnthropic && m.provider != llmcost.ProviderOpenAI:
+		case !slices.Contains(pricers, m.provider):
 			panic(fmt.Sprintf("listprice: model %q has unlisted provider %q", m.id, m.provider))
 		case m.id != m.key:
 			aliases[m.id] = m.key

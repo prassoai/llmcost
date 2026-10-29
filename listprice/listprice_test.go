@@ -178,13 +178,16 @@ func TestCuration(t *testing.T) {
 	if got, ok := b.of("acme-1", llmcost.ClaudeUsage{CacheCreationInputTokens: 1_000_000, CacheCreation1hInputTokens: 1_000_000}); !ok || got != (Price{Cost: 125_000, Price: 131_250, Source: SourceDegraded}) {
 		t.Errorf("of(1h writes, no 1h rate) = %+v, %v; want the 5m rate, degraded", got, ok)
 	}
-	rows := b.rates()
-	if len(rows) == 0 || rows[0].Model != "acme-1" || rows[0].Key != "acme-key-1" || !rows[0].Published || rows[0].Source != SourceOverride {
-		t.Fatalf("first row = %+v, want the published alias priced from its override", rows[0])
+	if rows := b.rates(); len(rows) == 0 || rows[0].Model != "acme-1" || !rows[0].Published || rows[0].PricedBy != llmcost.ProviderAnthropic {
+		t.Fatalf("first rate = %+v, want the published alias", rows)
 	}
-	for _, r := range rows {
-		if r.Key == "acme-key-1" && r.Model != "acme-1" {
-			t.Errorf("override key listed again unpublished: %+v", r)
+	costs := b.costs()
+	if len(costs) == 0 || costs[0].Model != "acme-1" || costs[0].Key != "acme-key-1" || costs[0].Source != SourceOverride {
+		t.Fatalf("first cost = %+v, want the published alias priced from its override", costs)
+	}
+	for _, c := range costs {
+		if c.Key == "acme-key-1" && c.Model != "acme-1" {
+			t.Errorf("override key listed again unpublished: %+v", c)
 		}
 	}
 }
