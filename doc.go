@@ -56,7 +56,8 @@
 // for, or a mode (fast, pinned geo) the model has no multiplier for. Nothing
 // ever silently bills zero or falls back to another component's rate.
 // [RatesFor] exposes the raw per-token rates (base, tiers, and multipliers)
-// for callers that want them.
+// for callers that want them, and [Models] lists every key a first-party
+// provider prices.
 //
 // # Service tiers
 //
@@ -221,10 +222,11 @@
 //
 // model_prices_and_context_window.json is embedded byte-identical from
 // BerriAI/litellm (MIT; see THIRD_PARTY_LICENSES) at the commit pinned in
-// VENDORED_FROM. A weekly GitHub Actions workflow re-vendors it and opens a
-// PR; the validation gate (go test: schema parse, table invariants, data
-// canaries) fails that PR if upstream restructures the pricing schema or
-// drops the canary models. Merges to main are auto-tagged with the next
+// VENDORED_FROM ([LiteLLMCommit]). A daily GitHub Actions workflow re-vendors it
+// and opens a PR; the validation gate (go test: schema parse, table
+// invariants, data canaries) fails that PR if upstream restructures the
+// pricing schema or drops the canary models, and cmd/pricediff holds any
+// change to a published list price for human approval. Merges to main are auto-tagged with the next
 // patch version so consumers get a real Go module tag — and consumers'
 // resolution tests catch dropped models when they bump.
 //

@@ -1,16 +1,27 @@
-# Weekly sync of the vendored LiteLLM pricing data.
+# Daily sync of the vendored LiteLLM pricing data.
 #
 # Fetches model_prices_and_context_window.json at upstream's current main
 # commit; if it differs from the vendored copy, rewrites the embed, bumps the
 # VENDORED_FROM pin, and opens a PR.
 #
-# The validation gate — go test: schema parse, table invariants, and data
-# canaries (LiteLLM has shipped a broken cost map before) — runs here so its
-# outcome lands in the PR body and a failure alarms this run; ci.yml runs it
-# again on the PR itself. A gate failure still opens the PR (so the breakage
-# is visible and fixable on the sync branch) but fails this job to raise the
-# alarm. Consumers' own resolution tests catch dropped models when they bump
-# the module version.
+# The validation gate — go test: schema parse, table invariants, data canaries
+# (LiteLLM has shipped a broken cost map before), and every published
+# listprice model still pricing — runs here so its outcome lands in the PR
+# body; ci.yml runs it again on the PR itself.
+#
+# cmd/pricediff then classifies how the re-vendor moves the listprice book,
+# and the class sets the merge policy (DESIGN_LIST_PRICE.md):
+#
+#   none, unpublished-only, published-added  ready PR, auto-merge once CI passes
+#   published-price-change                   ready PR, a human approves; the PR
+#                                            body tables every list price moved
+#   published-removed, or the gate failed    draft PR and a failed run: merging
+#                                            would turn sold models into refusals
+#
+# Every merge auto-tags a patch release (tag.yml), which consumers pick up
+# with their own daily dependency bumps. A sync that lands on an already-open
+# sync PR re-applies the policy, so a later published price change revokes an
+# earlier day's auto-merge.
 #
 # Opening the PR needs the SYNC_PR_TOKEN repo secret, not just the permissions
 # block below — see the token note on the "open PR" step.
@@ -18,7 +29,7 @@ name: sync-litellm
 
 on:
   schedule:
-    - cron: "43 6 * * 1" # Mondays 06:43 UTC — off the :00 stampede
+    - cron: "43 6 * * *" # daily 06:43 UTC — off the :00 stampede
   workflow_dispatch:
 
 permissions:
@@ -30,6 +41,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: dump the current price book
+        run: go run ./cmd/pricediff dump > "$RUNNER_TEMP/base.json"
       # Fetched via the authenticated API, not raw.githubusercontent.com —
       # anonymous fetches get 429-rate-limited from shared runner IPs.
       - name: fetch upstream at pinned-to-be commit
@@ -52,16 +68,57 @@ jobs:
             cp /tmp/upstream.json model_prices_and_context_window.json
             sed -i "s/^commit: .*/commit: ${sha}/" VENDORED_FROM
           fi
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        if: steps.fetch.outputs.changed == 'true'
-        with:
-          go-version-file: go.mod
       - name: validation gate
         id: gate
         if: steps.fetch.outputs.changed == 'true'
         continue-on-error: true
         run: go test ./...
+      # continue-on-error: a gate failure can leave the book unbuildable,
+      # and the PR must still open (as blocked) so the breakage is fixable.
+      - name: classify the price book change
+        id: diff
+        if: steps.fetch.outputs.changed == 'true'
+        continue-on-error: true
+        run: |
+          go run ./cmd/pricediff dump > "$RUNNER_TEMP/head.json"
+          class=$(go run ./cmd/pricediff class "$RUNNER_TEMP/base.json" "$RUNNER_TEMP/head.json")
+          echo "class=${class}" >> "$GITHUB_OUTPUT"
+          go run ./cmd/pricediff report "$RUNNER_TEMP/base.json" "$RUNNER_TEMP/head.json" > "$RUNNER_TEMP/report.md"
+      - name: decide merge policy
+        id: policy
+        if: steps.fetch.outputs.changed == 'true'
+        env:
+          GATE: ${{ steps.gate.outcome }}
+          DIFF: ${{ steps.diff.outcome }}
+          CLASS: ${{ steps.diff.outputs.class }}
+          SHA: ${{ steps.fetch.outputs.sha }}
+        run: |
+          if [ "$GATE" != success ] || [ "$DIFF" != success ] || [ "$CLASS" = published-removed ]; then
+            merge=blocked
+          elif [ "$CLASS" = published-price-change ]; then
+            merge=human
+          else
+            merge=auto
+          fi
+          echo "merge=${merge}" >> "$GITHUB_OUTPUT"
+          {
+            echo "Automated daily sync of \`model_prices_and_context_window.json\`"
+            echo "from BerriAI/litellm@${SHA}."
+            echo
+            echo "Validation gate (\`go test ./...\`): **${GATE}**. Merge policy: **${merge}**."
+            echo
+            case "$merge" in
+              auto) echo "No published list price moves, so this PR auto-merges once CI passes." ;;
+              human) echo "Published list prices move. Approve only if every change below is a real provider price change." ;;
+              blocked) echo "Blocked: the gate failed, the book did not build, or a published rate vanished. Merging would turn sold models into refusals — fix forward with an override in \`listprice/published.go\`." ;;
+            esac
+            echo
+            if [ "$DIFF" = success ]; then cat "$RUNNER_TEMP/report.md"; fi
+            echo
+            echo "Merging auto-tags the next patch release."
+          } > "$RUNNER_TEMP/body.md"
       - name: open PR
+        id: pr
         if: steps.fetch.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
@@ -77,7 +134,7 @@ jobs:
           # `Pull requests: write` and `Contents: write` on this repo; that
           # credential is not subject to the Actions policy. It must be
           # long-lived, because a secret is a static value read weeks apart by
-          # a weekly cron: a GitHub App *installation* token expires an hour
+          # a daily cron: a GitHub App *installation* token expires an hour
           # after minting, so storing one here would authenticate once and
           # 401 on every run after that. To use an App instead, mint the
           # installation token in this job (actions/create-github-app-token,
@@ -88,25 +145,29 @@ jobs:
           # step fails here rather than silently falling back to a credential
           # that cannot open the PR.
           token: ${{ secrets.SYNC_PR_TOKEN }}
-          # Draft so vendored upstream data cannot be merged unreviewed —
-          # marking it "Ready for review" is the human gate. always-true keeps
-          # it draft across weekly re-syncs, forcing re-review each time.
-          draft: always-true
+          # Applies on creation only; the next step reconciles an open PR.
+          draft: ${{ steps.policy.outputs.merge == 'blocked' }}
           branch: sync/litellm-prices
           commit-message: "Sync LiteLLM pricing data to BerriAI/litellm@${{ steps.fetch.outputs.sha }}"
           title: "Sync LiteLLM pricing data"
-          body: |
-            Automated weekly sync of `model_prices_and_context_window.json`
-            from BerriAI/litellm@${{ steps.fetch.outputs.sha }}.
-
-            Validation gate (`go test ./...` — schema parse, table
-            invariants, data canaries): **${{ steps.gate.outcome }}**. If it
-            failed, upstream restructured its pricing schema or dropped a
-            canary model — investigate before merging.
-
-            Merging auto-tags the next patch release.
-      - name: fail job if gate failed
-        if: steps.fetch.outputs.changed == 'true' && steps.gate.outcome == 'failure'
+          body-path: ${{ runner.temp }}/body.md
+      - name: apply merge policy
+        if: steps.fetch.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_PR_TOKEN }}
+          PR: ${{ steps.pr.outputs.pull-request-number }}
+          MERGE: ${{ steps.policy.outputs.merge }}
         run: |
-          echo "::error::validation gate failed: pricing schema restructured or a canary model dropped upstream"
+          read -r draft auto < <(gh pr view "$PR" --json isDraft,autoMergeRequest --jq '"\(.isDraft) \(.autoMergeRequest != null)"')
+          if [ "$MERGE" != auto ] && [ "$auto" = true ]; then gh pr merge --disable-auto "$PR"; fi
+          if [ "$MERGE" = blocked ]; then
+            if [ "$draft" = false ]; then gh pr ready --undo "$PR"; fi
+            exit 0
+          fi
+          if [ "$draft" = true ]; then gh pr ready "$PR"; fi
+          if [ "$MERGE" = auto ]; then gh pr merge --auto --squash "$PR"; fi
+      - name: fail job if blocked
+        if: steps.policy.outputs.merge == 'blocked'
+        run: |
+          echo "::error::sync blocked: the validation gate failed, the price book did not build, or a published rate vanished"
           exit 1
