@@ -64,22 +64,25 @@ type row struct {
 	Fast      bool   `json:"fast"`
 	Above     int64  `json:"above_prompt_tokens"`
 	Component string `json:"component"`
-	// Cost is exact USD per million tokens, as a big.Rat string.
-	Cost string `json:"cost"`
+	// Cost is exact USD per million tokens. It encodes as a big.Rat string,
+	// so a malformed one fails decoding.
+	Cost *big.Rat `json:"cost"`
 }
 
+// key identifies a rate. It includes the provider, so a model moving to
+// another provider is a removal, never an unchanged rate.
 type key struct {
-	model, tier, component string
-	fast                   bool
-	above                  int64
+	provider, model, tier, component string
+	fast                             bool
+	above                            int64
 }
 
-func (r row) key() key { return key{r.Model, r.Tier, r.Component, r.Fast, r.Above} }
+func (r row) key() key { return key{r.Provider, r.Model, r.Tier, r.Component, r.Fast, r.Above} }
 
 func rows(book []listprice.Rate) []row {
 	out := make([]row, len(book))
 	for i, r := range book {
-		out[i] = row{string(r.Provider), r.Model, r.Published, string(r.Tier), r.Fast, r.AbovePromptTokens, r.Component.String(), r.Cost.RatString()}
+		out[i] = row{string(r.Provider), r.Model, r.Published, string(r.Tier), r.Fast, r.AbovePromptTokens, r.Component.String(), r.Cost}
 	}
 	return out
 }
@@ -92,6 +95,9 @@ func load(path string) ([]row, error) {
 	var out []row
 	if err := json.Unmarshal(b, &out); err != nil {
 		return nil, fmt.Errorf("decoding %s: %w", path, err)
+	}
+	if i := slices.IndexFunc(out, func(r row) bool { return r.Cost == nil }); i >= 0 {
+		return nil, fmt.Errorf("decoding %s: row %d has no cost", path, i)
 	}
 	return out, nil
 }
@@ -124,12 +130,12 @@ func diff(base, head []row) delta {
 	for _, r := range base {
 		switch hr := h[r.key()]; {
 		case !r.Published:
-			if hr == nil || hr.Cost != r.Cost {
+			if hr == nil || hr.Cost.Cmp(r.Cost) != 0 {
 				d.unpublished++
 			}
 		case hr == nil:
 			d.removed = append(d.removed, change{base: &r})
-		case hr.Cost != r.Cost:
+		case hr.Cost.Cmp(r.Cost) != 0:
 			d.repriced = append(d.repriced, change{&r, hr})
 		}
 	}
@@ -194,10 +200,6 @@ func price(r *row) string {
 	if r == nil {
 		return "—"
 	}
-	cost, ok := new(big.Rat).SetString(r.Cost)
-	if !ok {
-		panic(fmt.Sprintf("pricediff: malformed cost %q", r.Cost))
-	}
-	p := strings.TrimRight(new(big.Rat).Mul(cost, big.NewRat(10_000+listprice.MarkupBasisPoints, 10_000)).FloatString(10), "0")
+	p := strings.TrimRight(new(big.Rat).Mul(r.Cost, big.NewRat(10_000+listprice.MarkupBasisPoints, 10_000)).FloatString(10), "0")
 	return "$" + strings.TrimSuffix(p, ".")
 }

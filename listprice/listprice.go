@@ -3,6 +3,7 @@ package listprice
 import (
 	"cmp"
 	"fmt"
+	"math"
 	"runtime/debug"
 	"slices"
 	"sync"
@@ -49,9 +50,16 @@ type Price struct {
 
 // Markup returns the list price of cost: cost plus [MarkupBasisPoints],
 // rounded up to a whole nls. Anyone holding a recorded cost re-derives its
-// price with it.
+// price with it. A negative cost, or one whose price overflows int64, is
+// impossible and panics, as llmcost does for a cost that overflows.
 func Markup(cost llmcost.Nls) llmcost.Nls {
-	return cost + (cost*MarkupBasisPoints+9_999)/10_000
+	// Marking up whole ten-thousands and the remainder separately keeps
+	// cost*MarkupBasisPoints from overflowing before the sum can.
+	m := cost/10_000*MarkupBasisPoints + (cost%10_000*MarkupBasisPoints+9_999)/10_000
+	if cost < 0 || m > math.MaxInt64-cost {
+		panic(fmt.Sprintf("listprice: no list price for a cost of %d nls", cost))
+	}
+	return cost + m
 }
 
 // Of prices one call by its llmcost [llmcost.Usage]. model is the id the

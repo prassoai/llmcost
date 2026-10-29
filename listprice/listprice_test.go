@@ -1,6 +1,8 @@
 package listprice
 
 import (
+	"math"
+	"math/big"
 	"regexp"
 	"slices"
 	"testing"
@@ -16,6 +18,39 @@ func TestMarkup(t *testing.T) {
 		if got := Markup(cost); got != want {
 			t.Errorf("Markup(%d) = %d, want %d", cost, got, want)
 		}
+	}
+}
+
+// TestMarkupIsExactUpToOverflow requires Markup to be the exact ceiling of
+// cost×(1+MarkupBasisPoints/10⁴) for every cost whose price fits an int64 —
+// including costs where cost×MarkupBasisPoints alone would overflow — and to
+// panic rather than wrap for a negative cost or one whose price does not fit.
+func TestMarkupIsExactUpToOverflow(t *testing.T) {
+	exact := func(cost llmcost.Nls) *big.Int {
+		n := new(big.Int).Mul(big.NewInt(int64(cost)), big.NewInt(10_000+MarkupBasisPoints))
+		n.Add(n, big.NewInt(9_999))
+		return n.Div(n, big.NewInt(10_000))
+	}
+	// The largest cost whose price fits: floor(MaxInt64×10⁴/(10⁴+bps)).
+	limit := new(big.Int).Div(new(big.Int).Mul(big.NewInt(math.MaxInt64), big.NewInt(10_000)), big.NewInt(10_000+MarkupBasisPoints))
+	if exact(llmcost.Nls(limit.Int64())).Cmp(big.NewInt(math.MaxInt64)) > 0 {
+		limit.Sub(limit, big.NewInt(1))
+	}
+	top := llmcost.Nls(limit.Int64())
+	for _, cost := range []llmcost.Nls{0, 1, 9_999, 10_000, 10_001, 19, 21, math.MaxInt64 / MarkupBasisPoints, math.MaxInt64/MarkupBasisPoints + 1, top - 10_001, top - 1, top} {
+		if got, want := big.NewInt(int64(Markup(cost))), exact(cost); got.Cmp(want) != 0 {
+			t.Errorf("Markup(%d) = %s, want %s", cost, got, want)
+		}
+	}
+	for _, cost := range []llmcost.Nls{-1, top + 1, math.MaxInt64} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("Markup(%d) did not panic", cost)
+				}
+			}()
+			Markup(cost)
+		}()
 	}
 }
 
