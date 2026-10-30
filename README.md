@@ -148,8 +148,30 @@ modeled.
   can't silently drop a model you depend on.
 
 `RatesFor(model, tier)` exposes the raw per-token
-rates — base and tiers — for callers that want them. See `doc.go` for the
+rates — base and tiers — for callers that want them. `Models(provider)` lists
+every key a first-party provider prices, sorted, and `LiteLLMCommit()` is the
+vendored data's upstream commit. See `doc.go` for the
 full contract.
+
+## List prices — `listprice`
+
+`listprice` is the inference price book shared by murmur and Macroscope: a
+call's list price is its llmcost cost plus `MarkupBasisPoints` (5%), rounded up
+to a whole nls.
+
+```go
+p, ok := listprice.Of("claude-opus-5", usage) // p.Cost, p.Price, p.Source
+ok = listprice.Priceable("gpt-5.5", llmcost.TierFlex, "") // before the call
+v := listprice.CurrentVersion()                // "v0.5.0+litellm.1a2b3c4d"
+```
+
+`listprice/published.go` curates the models sold by name — product id to
+llmcost key — and overrides for rates LiteLLM lacks or gets wrong.
+`listprice.Book()` enumerates the rate card, exact USD per million tokens:
+one price per model whichever provider serves it, beside the cost of the
+provider that sets it. `listprice.Costs()` enumerates every provider's cost
+for those models — Bedrock, Vertex AI, Azure and Fireworks included — for
+audit tables. See `docs/finished/DESIGN_LIST_PRICE.md`.
 
 ## Vendored data
 
@@ -157,16 +179,28 @@ full contract.
 [BerriAI/litellm](https://github.com/BerriAI/litellm) (MIT — see
 `THIRD_PARTY_LICENSES`) at the commit pinned in `VENDORED_FROM`.
 
-A weekly workflow (`.github/workflows/sync.yml`) re-fetches upstream, and if
+A daily workflow (`.github/workflows/sync.yml`) re-fetches upstream, and if
 the data changed, bumps the pin and opens a PR. The validation gate —
 `go test`, run both in the sync job and by CI — fails the update if upstream
-restructures the pricing schema or drops the canary models' pricing
-(LiteLLM has shipped a broken cost map before). Consumers' own resolution
-tests catch dropped models when they bump the module version.
+restructures the pricing schema, drops the canary models' pricing, or stops
+pricing a published `listprice` model (LiteLLM has shipped a broken cost map
+before). Consumers' own resolution tests catch dropped models when they bump
+the module version.
+
+`cmd/pricediff` then classifies how the update moves the list-price book, and
+the class sets the merge policy:
+
+| Class | Merge |
+|---|---|
+| `none`, `unpublished-only`, `published-added` | ready PR, auto-merges once CI passes |
+| `published-price-change` | ready PR; a human approves the before/after table in its body |
+| `published-removed`, or the gate failed | draft PR and a failed run |
+
+Auto-merge needs the repository's "Allow auto-merge" setting.
 
 Opening that PR requires the repo secret `SYNC_PR_TOKEN` — a fine-grained PAT
 with `Pull requests: write` and `Contents: write` on this repo. It has to be
-long-lived: the secret is read by a weekly cron, so a GitHub App *installation*
+long-lived: the secret is read by a daily cron, so a GitHub App *installation*
 token (valid one hour) would 401 on every run after the first. Prefer an App?
 Mint the installation token inside the job with `actions/create-github-app-token`
 and pass its output. Actions' default `GITHUB_TOKEN` cannot be
