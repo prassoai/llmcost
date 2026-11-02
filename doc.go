@@ -205,6 +205,10 @@
 // overrides; the zero-value Table behaves identically to the package-level
 // functions (no overrides). [Table.Cost] and [Table.RatesFor] mirror
 // [Cost] and [RatesFor] with alias and override resolution.
+// [NewFrom] applies the same [Config] to a [Snapshot] that [Parse] built
+// from LiteLLM pricing bytes the caller fetched — for example the file at a
+// newer BerriAI/litellm commit than [LiteLLMCommit] — and prices from those
+// bytes alone; NewFrom of the vendored bytes is identical to New.
 // [MustParseRat] is a convenience for declaring exact rates in [Config]
 // literals. See the [Config] type doc for the override mechanisms and
 // [New] for the construction-time validation contract.

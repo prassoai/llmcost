@@ -5,8 +5,8 @@ import (
 	"math/big"
 )
 
-// Config declares consumer-specific customizations applied on top of the
-// embedded LiteLLM snapshot when constructing a [Table].
+// Config declares consumer-specific customizations applied on top of a
+// LiteLLM snapshot when constructing a [Table].
 type Config struct {
 	// Aliases maps consumer-internal model ids to LiteLLM pricing keys.
 	// When Table.Cost or Table.RatesFor receives a model string that
@@ -34,13 +34,15 @@ type Config struct {
 	Overrides map[string]*Rates
 }
 
-// Table is a configured pricing table: the embedded LiteLLM snapshot
-// plus consumer-declared overrides. The zero value is the unoverridden
-// snapshot (identical to the package-level functions). Construct with
-// [New] to apply overrides.
+// Table is a configured pricing table: a LiteLLM snapshot plus
+// consumer-declared overrides. The zero value is the unoverridden embedded
+// snapshot (identical to the package-level functions). Construct with [New]
+// to apply overrides to the embedded snapshot, or with [NewFrom] to apply
+// them to a [Parse]d one.
 //
 // A Table is safe for concurrent use — it is immutable after construction.
 type Table struct {
+	models    map[string]map[ServiceTier]Rates // nil: the embedded snapshot
 	aliases   map[string]string
 	overrides map[string]*Rates
 }
@@ -58,7 +60,13 @@ func MustParseRat(s string) *big.Rat {
 }
 
 // New returns a Table with the given config applied on top of the
-// embedded LiteLLM snapshot. Panics if the config is malformed:
+// embedded LiteLLM snapshot. It is [NewFrom] of the embedded snapshot.
+func New(cfg Config) *Table {
+	return NewFrom(&Snapshot{models: table()}, cfg)
+}
+
+// NewFrom returns a Table with the given config applied on top of snap.
+// Panics if the config is malformed:
 //
 //   - an alias with an empty target
 //   - an alias whose target is itself an alias key (no chaining)
@@ -72,9 +80,8 @@ func MustParseRat(s string) *big.Rat {
 //     or non-ascending thresholds or unpriceable tier rates
 //
 // Misconfiguration is a bug and fails at init, not at query time.
-func New(cfg Config) *Table {
-	snap := table()
-	t := &Table{}
+func NewFrom(snap *Snapshot, cfg Config) *Table {
+	t := &Table{models: snap.models}
 
 	if len(cfg.Aliases) > 0 {
 		t.aliases = make(map[string]string, len(cfg.Aliases))
@@ -85,7 +92,7 @@ func New(cfg Config) *Table {
 			if _, chain := cfg.Aliases[v]; chain {
 				panic(fmt.Sprintf("llmcost: alias %q -> %q chains (target is itself an alias key)", k, v))
 			}
-			if _, inSnap := snap[v]; !inSnap {
+			if _, inSnap := snap.models[v]; !inSnap {
 				if _, inOverrides := cfg.Overrides[v]; !inOverrides {
 					panic(fmt.Sprintf("llmcost: alias %q -> %q: target not in snapshot or Config.Overrides", k, v))
 				}
@@ -183,7 +190,11 @@ func (t *Table) rates(model string, tier ServiceTier) (Rates, bool) {
 			return r.clone(), true
 		}
 	}
-	r, ok := table()[model][tier]
+	models := t.models
+	if models == nil {
+		models = table()
+	}
+	r, ok := models[model][tier]
 	if !ok {
 		return Rates{}, false
 	}
