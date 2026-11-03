@@ -125,3 +125,23 @@ func TestParseRejectsUnusableData(t *testing.T) {
 		}
 	}
 }
+
+// TestNewFromRejectsUninitializedSnapshot encodes that NewFrom never builds
+// a Table over no snapshot: a nil or zero-value *Snapshot (one not built by
+// Parse) panics instead of yielding a Table that, like the zero-value Table,
+// would silently price from the embedded data.
+func TestNewFromRejectsUninitializedSnapshot(t *testing.T) {
+	for name, snap := range map[string]*Snapshot{"nil": nil, "zero": {}} {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Error("NewFrom accepted an uninitialized Snapshot; want panic")
+				}
+			}()
+			tbl := NewFrom(snap, Config{})
+			if _, ok := tbl.Cost("claude-sonnet-4-5", ClaudeUsage{InputTokens: 1000, OutputTokens: 100}); ok {
+				t.Error("NewFrom(uninitialized) priced claude-sonnet-4-5 from the embedded snapshot")
+			}
+		})
+	}
+}

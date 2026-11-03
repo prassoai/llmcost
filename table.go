@@ -65,8 +65,11 @@ func New(cfg Config) *Table {
 	return NewFrom(&Snapshot{models: table()}, cfg)
 }
 
-// NewFrom returns a Table with the given config applied on top of snap.
-// Panics if the config is malformed:
+// NewFrom returns a Table with the given config applied on top of snap,
+// pricing from snap alone. Panics if snap is nil or uninitialized (not
+// built by [Parse]) — a Table over no snapshot would be indistinguishable
+// from the zero value and silently price from the embedded data — or if the
+// config is malformed:
 //
 //   - an alias with an empty target
 //   - an alias whose target is itself an alias key (no chaining)
@@ -81,6 +84,9 @@ func New(cfg Config) *Table {
 //
 // Misconfiguration is a bug and fails at init, not at query time.
 func NewFrom(snap *Snapshot, cfg Config) *Table {
+	if snap == nil || snap.models == nil {
+		panic("llmcost: NewFrom: uninitialized Snapshot (build it with Parse)")
+	}
 	t := &Table{models: snap.models}
 
 	if len(cfg.Aliases) > 0 {

@@ -530,8 +530,8 @@ func ceilNls(usd *big.Rat) Nls {
 
 // Snapshot is one parsed LiteLLM pricing map: per-model, per-service-tier
 // rates with the Azure backfill applied. Build one with [Parse] and price
-// with it through [NewFrom]. A Snapshot is immutable and safe for concurrent
-// use.
+// with it through [NewFrom]. The zero value is not a usable Snapshot. A
+// Snapshot is immutable and safe for concurrent use.
 type Snapshot struct {
 	models map[string]map[ServiceTier]Rates
 }
