@@ -528,12 +528,25 @@ func ceilNls(usd *big.Rat) Nls {
 	return q.Int64()
 }
 
-// table lazily parses the embedded LiteLLM JSON into per-model, per-service-
-// tier rates. A malformed embed is impossible past CI and panics.
-var table = sync.OnceValue(func() map[string]map[ServiceTier]Rates {
+// Snapshot is one parsed LiteLLM pricing map: per-model, per-service-tier
+// rates with the Azure backfill applied. Build one with [Parse] and price
+// with it through [NewFrom]. The zero value is not a usable Snapshot. A
+// Snapshot is immutable and safe for concurrent use.
+type Snapshot struct {
+	models map[string]map[ServiceTier]Rates
+}
+
+// Parse parses LiteLLM's model_prices_and_context_window.json from data —
+// typically bytes fetched from a pinned BerriAI/litellm commit — into the
+// same Snapshot the embedded data produces, so [NewFrom] of the embedded
+// bytes prices exactly like [New]. Entries that cannot bill at the standard
+// tier are skipped, as for the embedded data. Malformed JSON, and a map with
+// no priceable model at all — an upstream schema change, never a real price
+// list — are errors.
+func Parse(data []byte) (*Snapshot, error) {
 	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(litellmJSON, &raw); err != nil {
-		panic(fmt.Errorf("llmcost: parse embedded LiteLLM data: %w", err))
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("llmcost: decode LiteLLM pricing JSON: %w", err)
 	}
 	models := make(map[string]map[ServiceTier]Rates, len(raw))
 	for model, spec := range raw {
@@ -541,8 +554,21 @@ var table = sync.OnceValue(func() map[string]map[ServiceTier]Rates {
 			models[model] = m
 		}
 	}
+	if len(models) == 0 {
+		return nil, fmt.Errorf("llmcost: LiteLLM pricing JSON has no priceable models (%d entries)", len(raw))
+	}
 	backfillAzureRates(models)
-	return models
+	return &Snapshot{models: models}, nil
+}
+
+// table lazily parses the embedded LiteLLM JSON. A malformed embed is
+// impossible past CI and panics.
+var table = sync.OnceValue(func() map[string]map[ServiceTier]Rates {
+	s, err := Parse(litellmJSON)
+	if err != nil {
+		panic(fmt.Errorf("llmcost: parse embedded LiteLLM data: %w", err))
+	}
+	return s.models
 })
 
 // backfillAzureRates fills nil per-token rate fields in Azure OpenAI entries
