@@ -32,8 +32,16 @@ type book struct {
 
 // newBook panics on a malformed curation — a duplicate id, a provider the
 // book does not list, or anything [llmcost.New] rejects — because a price
-// book that cannot be built must fail at init, not price.
+// book that cannot be built must fail at init, not price. A published model
+// whose key its provider no longer bills is suppressed rather than rejected:
+// the vendored data removed the model, so it drops out of the book like any
+// other. Suppressing its id, not just leaving out its alias, keeps an id that
+// is itself a snapshot key from pricing at that key's rates instead.
 func newBook(published []model, overrides map[string]override) *book {
+	rates := make(map[string]*llmcost.Rates, len(overrides))
+	for key, o := range overrides {
+		rates[key] = &o.rates
+	}
 	aliases := map[string]string{}
 	seen := map[string]bool{}
 	for _, m := range published {
@@ -42,14 +50,12 @@ func newBook(published []model, overrides map[string]override) *book {
 			panic(fmt.Sprintf("listprice: model %q is published twice", m.id))
 		case !slices.Contains(pricers, m.provider):
 			panic(fmt.Sprintf("listprice: model %q has unlisted provider %q", m.id, m.provider))
+		case !billed(m, overrides):
+			rates[m.id] = nil
 		case m.id != m.key:
 			aliases[m.id] = m.key
 		}
 		seen[m.id] = true
-	}
-	rates := make(map[string]*llmcost.Rates, len(overrides))
-	for key, o := range overrides {
-		rates[key] = &o.rates
 	}
 	return &book{
 		table:     llmcost.New(llmcost.Config{Aliases: aliases, Overrides: rates}),
@@ -57,6 +63,13 @@ func newBook(published []model, overrides map[string]override) *book {
 		published: published,
 		overrides: overrides,
 	}
+}
+
+// billed reports whether m's key prices: its provider bills it, or an
+// override restates it.
+func billed(m model, overrides map[string]override) bool {
+	_, ok := overrides[m.key]
+	return ok || slices.Contains(llmcost.Models(m.provider), m.key)
 }
 
 func (b *book) source(model string) Source {

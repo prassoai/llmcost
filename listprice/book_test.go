@@ -48,9 +48,41 @@ func TestBook(t *testing.T) {
 		}
 	}
 	for _, m := range published {
-		if !models[m.id] {
-			t.Errorf("published model %s missing from the book", m.id)
+		if p := Priceable(m.id, llmcost.TierStandard, ""); models[m.id] != p {
+			t.Errorf("published model %s: in the book %v, priceable at standard %v", m.id, models[m.id], p)
 		}
+	}
+}
+
+// TestPublishedRemovalDropsOut requires a published model whose key the
+// vendored data no longer prices to leave the book and be refused, never to
+// panic or price at zero: an approved removal flows to every consumer as an
+// absent model. That holds even when the removed alias's id is itself a
+// snapshot key (claude-sonnet-4-5 here), which must not fall back to pricing
+// at that key's rates once its curated target is gone.
+func TestPublishedRemovalDropsOut(t *testing.T) {
+	gone := []string{"acme-retired", "acme-alias", "claude-sonnet-4-5"}
+	b := newBook([]model{
+		{gone[0], gone[0], llmcost.ProviderAnthropic},
+		{gone[1], "acme-retired-key", llmcost.ProviderAnthropic},
+		{gone[2], "acme-retired-sonnet", llmcost.ProviderAnthropic},
+		{"claude-opus-5", "claude-opus-5", llmcost.ProviderAnthropic},
+	}, nil)
+	for _, r := range b.rates() {
+		if slices.Contains(gone, r.Model) {
+			t.Fatalf("removed model listed: %+v", r)
+		}
+	}
+	for _, id := range gone {
+		if b.priceable(id, llmcost.TierStandard, "") {
+			t.Errorf("removed %s is priceable", id)
+		}
+		if p, ok := b.of(id, llmcost.ClaudeUsage{InputTokens: 1_000_000}); ok {
+			t.Errorf("removed %s priced: %+v", id, p)
+		}
+	}
+	if !b.priceable("claude-opus-5", llmcost.TierStandard, "") {
+		t.Error("a removal took a still-priced model with it")
 	}
 }
 

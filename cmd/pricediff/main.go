@@ -5,10 +5,11 @@
 //	pricediff class base.json head.json # one of the classes below
 //	pricediff report base.json head.json # the PR-body markdown
 //
-// Classes, most severe first: published-removed (a published rate vanished;
-// the sync must not merge), published-price-change (a published rate moved or
-// appeared beside existing ones; a human approves), published-added (a
-// published model gained its first rates), unpublished-only, none.
+// Classes, most severe first: published-removed (a published rate vanished,
+// so merging takes it off the price page; a human approves),
+// published-price-change (a published rate moved or appeared beside existing
+// ones; a human approves), published-added (a published model gained its
+// first rates), unpublished-only, none.
 package main
 
 import (
@@ -174,11 +175,26 @@ func (d delta) report() string {
 		fmt.Fprintf(&s, " (%d unpublished rates changed)", d.unpublished)
 	}
 	s.WriteString("\n")
-	changes := slices.Concat(d.removed, d.repriced, d.added)
-	if len(changes) == 0 {
-		return s.String()
+	if len(d.removed) > 0 {
+		models := make([]string, len(d.removed))
+		for i, c := range d.removed {
+			models[i] = c.base.Model
+		}
+		slices.Sort(models)
+		fmt.Fprintf(&s, "\nPublished rates removed from `%s`. Merging takes them out of the book: consumers refuse them before a call, and the price page drops them. Last list prices, USD per 1M tokens:\n\n", strings.Join(slices.Compact(models), "`, `"))
+		table(&s, d.removed)
 	}
-	s.WriteString("\nPublished list prices, USD per 1M tokens:\n\n| Model | Tier | Speed | Prompt above | Component | Before | After |\n|---|---|---|---|---|---|---|\n")
+	if changes := slices.Concat(d.repriced, d.added); len(changes) > 0 {
+		s.WriteString("\nPublished list prices, USD per 1M tokens:\n\n")
+		table(&s, changes)
+	}
+	return s.String()
+}
+
+// table writes changes as a markdown table of list prices before and after,
+// sorted by model, tier and component.
+func table(s *strings.Builder, changes []change) {
+	s.WriteString("| Model | Tier | Speed | Prompt above | Component | Before | After |\n|---|---|---|---|---|---|---|\n")
 	slices.SortStableFunc(changes, func(x, y change) int {
 		a, b := cmp.Or(x.base, x.head), cmp.Or(y.base, y.head)
 		return cmp.Or(strings.Compare(a.Model, b.Model), strings.Compare(a.Tier, b.Tier), strings.Compare(a.Component, b.Component))
@@ -189,9 +205,8 @@ func (d delta) report() string {
 		if r.Fast {
 			speed = "fast"
 		}
-		fmt.Fprintf(&s, "| %s | %s | %s | %d | %s | %s | %s |\n", r.Model, r.Tier, speed, r.Above, r.Component, price(c.base), price(c.head))
+		fmt.Fprintf(s, "| %s | %s | %s | %d | %s | %s | %s |\n", r.Model, r.Tier, speed, r.Above, r.Component, price(c.base), price(c.head))
 	}
-	return s.String()
 }
 
 // price renders a row's list price exactly, or "—" for a rate that does not
