@@ -32,7 +32,9 @@ type book struct {
 
 // newBook panics on a malformed curation — a duplicate id, a provider the
 // book does not list, or anything [llmcost.New] rejects — because a price
-// book that cannot be built must fail at init, not price.
+// book that cannot be built must fail at init, not price. An alias whose key
+// its provider no longer bills is left out rather than rejected: the vendored
+// data removed the model, so it drops out of the book like any other.
 func newBook(published []model, overrides map[string]override) *book {
 	aliases := map[string]string{}
 	seen := map[string]bool{}
@@ -42,7 +44,7 @@ func newBook(published []model, overrides map[string]override) *book {
 			panic(fmt.Sprintf("listprice: model %q is published twice", m.id))
 		case !slices.Contains(pricers, m.provider):
 			panic(fmt.Sprintf("listprice: model %q has unlisted provider %q", m.id, m.provider))
-		case m.id != m.key:
+		case m.id != m.key && billed(m, overrides):
 			aliases[m.id] = m.key
 		}
 		seen[m.id] = true
@@ -57,6 +59,13 @@ func newBook(published []model, overrides map[string]override) *book {
 		published: published,
 		overrides: overrides,
 	}
+}
+
+// billed reports whether m's key prices: its provider bills it, or an
+// override restates it.
+func billed(m model, overrides map[string]override) bool {
+	_, ok := overrides[m.key]
+	return ok || slices.Contains(llmcost.Models(m.provider), m.key)
 }
 
 func (b *book) source(model string) Source {

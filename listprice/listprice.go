@@ -90,7 +90,7 @@ type Version struct {
 	LiteLLMCommit string
 }
 
-// String is the version's stable identifier, e.g. "v0.5.0+litellm.4846d9c2".
+// String is the version's stable identifier, e.g. "v0.4.16+litellm.4846d9c2".
 func (v Version) String() string { return v.Module + "+litellm." + v.LiteLLMCommit[:8] }
 
 // CurrentVersion is the version of the price book compiled into this binary.

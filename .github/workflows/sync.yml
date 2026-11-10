@@ -4,10 +4,9 @@
 # commit; if it differs from the vendored copy, rewrites the embed, bumps the
 # VENDORED_FROM pin, and opens a PR.
 #
-# The validation gate — go test: schema parse, table invariants, data canaries
-# (LiteLLM has shipped a broken cost map before), and every published
-# listprice model still pricing — runs here so its outcome lands in the PR
-# body; ci.yml runs it again on the PR itself.
+# The validation gate — go test: schema parse, table invariants and data
+# canaries (LiteLLM has shipped a broken cost map before) — runs here so its
+# outcome lands in the PR body; ci.yml runs it again on the PR itself.
 #
 # cmd/pricediff then classifies how the re-vendor moves the listprice book,
 # and the class sets the merge policy (DESIGN_LIST_PRICE.md):
@@ -15,8 +14,10 @@
 #   none, unpublished-only, published-added  ready PR, auto-merge once CI passes
 #   published-price-change                   ready PR, a human approves; the PR
 #                                            body tables every list price moved
-#   published-removed, or the gate failed    draft PR and a failed run: merging
-#                                            would turn sold models into refusals
+#   published-removed                        ready PR, a human approves; the PR
+#                                            body names each model losing a
+#                                            published rate, with its last price
+#   the gate failed, or no book built        draft PR and a failed run
 #
 # Every merge auto-tags a patch release (tag.yml), which consumers pick up
 # with their own daily dependency bumps. A sync that lands on an already-open
@@ -93,9 +94,9 @@ jobs:
           CLASS: ${{ steps.diff.outputs.class }}
           SHA: ${{ steps.fetch.outputs.sha }}
         run: |
-          if [ "$GATE" != success ] || [ "$DIFF" != success ] || [ "$CLASS" = published-removed ]; then
+          if [ "$GATE" != success ] || [ "$DIFF" != success ]; then
             merge=blocked
-          elif [ "$CLASS" = published-price-change ]; then
+          elif [ "$CLASS" = published-price-change ] || [ "$CLASS" = published-removed ]; then
             merge=human
           else
             merge=auto
@@ -109,8 +110,8 @@ jobs:
             echo
             case "$merge" in
               auto) echo "No published list price moves, so this PR auto-merges once CI passes." ;;
-              human) echo "Published list prices move. Approve only if every change below is a real provider price change." ;;
-              blocked) echo "Blocked: the gate failed, the book did not build, or a published rate vanished. Merging would turn sold models into refusals — fix forward with an override in \`listprice/published.go\`." ;;
+              human) echo "Published list prices move or are removed. Approve only if every change below is a real provider change: a removed rate leaves the price page and is refused before a call once this ships." ;;
+              blocked) echo "Blocked: the validation gate failed or the price book did not build. Fix the cause before merging." ;;
             esac
             echo
             if [ "$DIFF" = success ]; then cat "$RUNNER_TEMP/report.md"; fi
@@ -169,5 +170,5 @@ jobs:
       - name: fail job if blocked
         if: steps.policy.outputs.merge == 'blocked'
         run: |
-          echo "::error::sync blocked: the validation gate failed, the price book did not build, or a published rate vanished"
+          echo "::error::sync blocked: the validation gate failed or the price book did not build"
           exit 1

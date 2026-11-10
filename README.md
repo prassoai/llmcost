@@ -162,7 +162,7 @@ to a whole nls.
 ```go
 p, ok := listprice.Of("claude-opus-5", usage) // p.Cost, p.Price, p.Source
 ok = listprice.Priceable("gpt-5.5", llmcost.TierFlex, "") // before the call
-v := listprice.CurrentVersion()                // "v0.5.0+litellm.1a2b3c4d"
+v := listprice.CurrentVersion()                // "v0.4.16+litellm.1a2b3c4d"
 ```
 
 `listprice/published.go` curates the models sold by name — product id to
@@ -182,9 +182,8 @@ audit tables. See `docs/finished/DESIGN_LIST_PRICE.md`.
 A daily workflow (`.github/workflows/sync.yml`) re-fetches upstream, and if
 the data changed, bumps the pin and opens a PR. The validation gate —
 `go test`, run both in the sync job and by CI — fails the update if upstream
-restructures the pricing schema, drops the canary models' pricing, or stops
-pricing a published `listprice` model (LiteLLM has shipped a broken cost map
-before). Consumers' own resolution tests catch dropped models when they bump
+restructures the pricing schema or drops the canary models' pricing (LiteLLM
+has shipped a broken cost map before). Consumers' own resolution tests catch dropped models when they bump
 the module version.
 
 `cmd/pricediff` then classifies how the update moves the list-price book, and
@@ -194,7 +193,12 @@ the class sets the merge policy:
 |---|---|
 | `none`, `unpublished-only`, `published-added` | ready PR, auto-merges once CI passes |
 | `published-price-change` | ready PR; a human approves the before/after table in its body |
-| `published-removed`, or the gate failed | draft PR and a failed run |
+| `published-removed` | ready PR; a human approves. Its body names each model losing a published rate, with that rate's last list price |
+| the gate failed, or the book did not build | draft PR and a failed run |
+
+An approved removal flows through like any other release: the model's rates
+leave `listprice.Book()`, so the generated price page drops them and
+`listprice.Priceable` refuses them before a call.
 
 Auto-merge needs the repository's "Allow auto-merge" setting.
 

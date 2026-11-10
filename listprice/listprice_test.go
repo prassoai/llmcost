@@ -4,7 +4,6 @@ import (
 	"math"
 	"math/big"
 	"regexp"
-	"slices"
 	"testing"
 
 	"github.com/prassoai/llmcost"
@@ -136,16 +135,15 @@ func TestPriceable(t *testing.T) {
 	}
 }
 
-// TestPublishedPriceable requires every published model to price at the
-// standard tier from its own provider's key: a data sync that drops one, or a
-// curation typo, must fail here rather than refuse a model sold by name.
+// TestPublishedPriceable requires every published model whose key its own
+// provider bills, or an override restates, to price at the standard tier under
+// its published id, so an alias always reaches its key. A key the vendored
+// data stopped pricing is a removal, which the daily sync hands to a human
+// (cmd/pricediff), so it is not a failure here.
 func TestPublishedPriceable(t *testing.T) {
 	for _, m := range published {
-		if !Priceable(m.id, llmcost.TierStandard, "") {
-			t.Errorf("published model %q does not price", m.id)
-		}
-		if _, ok := overrides[m.key]; !ok && !slices.Contains(llmcost.Models(m.provider), m.key) {
-			t.Errorf("published model %q prices from %q, which %s does not bill", m.id, m.key, m.provider)
+		if billed(m, overrides) && !Priceable(m.id, llmcost.TierStandard, "") {
+			t.Errorf("published model %q does not price from %s key %q", m.id, m.provider, m.key)
 		}
 	}
 }

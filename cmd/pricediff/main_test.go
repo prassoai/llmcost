@@ -27,7 +27,7 @@ func unpublished(model, cost string) row {
 }
 
 // TestClass pins the merge policy's inputs: which book changes a sync may
-// merge unattended, which need a human, and which must block.
+// merge unattended and which need a human.
 func TestClass(t *testing.T) {
 	base := []row{published("gpt-5.5", "input", "5"), published("gpt-5.5", "output", "40"), unpublished("gpt-old", "1")}
 	for _, tc := range []struct {
@@ -53,20 +53,30 @@ func TestClass(t *testing.T) {
 }
 
 // TestReport requires the PR body to show each published list price before
-// and after, markup included, so the approver reviews what customers pay.
+// and after, markup included, so the approver reviews what customers pay, and
+// to name every model losing a published rate beside its last list price, so
+// the approver sees exactly what leaves the price page.
 func TestReport(t *testing.T) {
 	got := diff(
-		[]row{published("gpt-5.5", "input", "5"), published("gpt-5.5", "output", "40")},
+		[]row{published("gpt-5.5", "input", "5"), published("gpt-5.5", "output", "40"), published("gpt-5.2", "input", "1")},
 		[]row{published("gpt-5.5", "input", "1/3"), unpublished("gpt-new", "1")},
 	).report()
+	removed, changed, ok := strings.Cut(got, "Published list prices")
+	if !ok {
+		t.Fatalf("report has no price-change table:\n%s", got)
+	}
 	for _, want := range []string{
 		"**published-removed** (1 unpublished rates changed)",
-		"| gpt-5.5 | standard | standard | 0 | input | $5.25 | $0.35 |",
+		"Published rates removed from `gpt-5.2`, `gpt-5.5`.",
+		"| gpt-5.2 | standard | standard | 0 | input | $1.05 | — |",
 		"| gpt-5.5 | standard | standard | 0 | output | $42 | — |",
 	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("report missing %q:\n%s", want, got)
+		if !strings.Contains(removed, want) {
+			t.Errorf("removals missing %q:\n%s", want, got)
 		}
+	}
+	if want := "| gpt-5.5 | standard | standard | 0 | input | $5.25 | $0.35 |"; !strings.Contains(changed, want) || strings.Contains(removed, want) {
+		t.Errorf("repricing %q not in the change table alone:\n%s", want, got)
 	}
 }
 

@@ -3,9 +3,10 @@ package listprice
 import "github.com/prassoai/llmcost"
 
 // published is the curated set of models sold by name, in the order the
-// price page lists them. Every entry must price at the standard tier
-// (TestPublishedPriceable), so a data sync that drops one fails CI instead
-// of turning a sold model into a refusal.
+// price page lists them. An entry whose key the vendored data no longer
+// prices drops out of the book: it has no list price, so [Priceable] refuses
+// it. The daily sync classifies that as published-removed and waits for a
+// human to approve it (cmd/pricediff).
 var published = []model{
 	{"claude-opus-5-5", "claude-opus-5-5", llmcost.ProviderAnthropic},
 	{"claude-sonnet-5-5", "claude-sonnet-5-5", llmcost.ProviderAnthropic},

@@ -14,8 +14,9 @@ The full design is murmuration's
   before the call; `Markup` re-derives a price from a recorded cost;
   `CurrentVersion` names the price book (`<module version>+litellm.<commit8>`).
 - **`listprice/published.go`** — the curated models sold by name (product id
-  → llmcost key, which is where aliases live) and rate overrides. Every entry
-  must price at the standard tier; CI enforces it.
+  → llmcost key, which is where aliases live) and rate overrides. An entry
+  whose key the vendored data stops pricing drops out of the book, and the
+  daily sync hands that removal to a human (`published-removed`).
 - **`listprice.Book()`** — the rate card as exact USD per million tokens: one
   list price per model, service tier, speed, context tier and component,
   whichever provider serves the model. Each rate names the provider whose
@@ -25,7 +26,7 @@ The full design is murmuration's
   the pricing provider and every cloud that serves the model under its own
   key (Bedrock, Vertex AI, Azure, Azure AI Foundry, Fireworks), resolved
   through `ModelSelector`. Consumers render the public price page from
-  `Book()` and the cost-vs-price audit table from both.
+  `Book()`.
 - **`Models(provider)`, `LiteLLMCommit()`** — enumeration and provenance the
   book needs from the root package.
 - **Daily refresh** — `sync.yml` runs daily; `cmd/pricediff` classifies each
