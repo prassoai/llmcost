@@ -57,12 +57,15 @@ func TestBook(t *testing.T) {
 // TestPublishedRemovalDropsOut requires a published model whose key the
 // vendored data no longer prices to leave the book and be refused, never to
 // panic or price at zero: an approved removal flows to every consumer as an
-// absent model.
+// absent model. That holds even when the removed alias's id is itself a
+// snapshot key (claude-sonnet-4-5 here), which must not fall back to pricing
+// at that key's rates once its curated target is gone.
 func TestPublishedRemovalDropsOut(t *testing.T) {
-	gone := []string{"acme-retired", "acme-alias"}
+	gone := []string{"acme-retired", "acme-alias", "claude-sonnet-4-5"}
 	b := newBook([]model{
 		{gone[0], gone[0], llmcost.ProviderAnthropic},
 		{gone[1], "acme-retired-key", llmcost.ProviderAnthropic},
+		{gone[2], "acme-retired-sonnet", llmcost.ProviderAnthropic},
 		{"claude-opus-5", "claude-opus-5", llmcost.ProviderAnthropic},
 	}, nil)
 	for _, r := range b.rates() {

@@ -197,8 +197,9 @@ the class sets the merge policy:
 | the gate failed, or the book did not build | draft PR and a failed run |
 
 An approved removal flows through like any other release: the model's rates
-leave `listprice.Book()`, so the generated price page drops them and
-`listprice.Priceable` refuses them before a call.
+leave `listprice.Book()`, so the generated price page drops them,
+`listprice.Priceable` refuses them before a call and `listprice.Of` refuses to
+price them — under the published id, even when that id is itself an llmcost key.
 
 Auto-merge needs the repository's "Allow auto-merge" setting.
 
