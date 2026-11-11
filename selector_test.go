@@ -97,7 +97,7 @@ func TestSelectorCanonicalNames(t *testing.T) {
 		// Vertex publisher MaaS path.
 		{ModelSelector{ProviderVertexAI, "gpt-oss-120b", ""}, "vertex_ai/openai/gpt-oss-120b-maas"},
 		// Azure's gpt-35 spelling of the vendor's gpt-3.5 name.
-		{ModelSelector{ProviderAzure, "gpt-3.5-turbo-16k-0613", ""}, "azure/gpt-35-turbo-16k-0613"},
+		{ModelSelector{ProviderAzure, "gpt-3.5-turbo-instruct", ""}, "azure/gpt-35-turbo-instruct"},
 		// Azure lists BOTH spellings of some models: the vendor spelling
 		// resolves natively; the gpt-35 twin stays reachable natively too.
 		{ModelSelector{ProviderAzure, "gpt-3.5-turbo", ""}, "azure/gpt-3.5-turbo"},
@@ -325,7 +325,8 @@ func TestSelectorCanonicalVendorNames(t *testing.T) {
 		// API (and so LiteLLM's direct key set) dropped them, the clouds kept
 		// them. The names are still the vendor's own.
 		ProviderBedrock: setOf(
-			"claude-3-5-haiku-20241022", "claude-3-5-sonnet-20240620", "claude-3-5-sonnet-20241022",
+			"claude-3-haiku-20240307", "claude-3-5-haiku-20241022",
+			"claude-3-5-sonnet-20240620", "claude-3-5-sonnet-20241022",
 			"claude-3-opus-20240229", "claude-3-7-sonnet-20240620", "claude-3-7-sonnet-20250219",
 			"claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-opus-4-1-20250805",
 			// Legacy Claude 1/2 family, where vN is the model version.
@@ -335,20 +336,25 @@ func TestSelectorCanonicalVendorNames(t *testing.T) {
 		),
 		ProviderVertexAI: setOf(
 			"claude-3-5-haiku", "claude-3-5-haiku-20241022", "claude-3-5-sonnet", "claude-3-5-sonnet-20240620",
-			"claude-3-haiku", "claude-3-haiku-20240307", "claude-3-opus", "claude-3-opus-20240229",
+			"claude-3-haiku", "claude-3-haiku-20240307",
 			"claude-3-sonnet", "claude-3-sonnet-20240229",
 			"gpt-oss-120b", "gpt-oss-20b",
 		),
 		// OpenAI lists the rolling ChatGPT model as "chat-latest"; Azure sells
 		// the same model, at the same rates, under an Azure-only "gpt-" prefix.
-		// Foundry publishes Opus fast mode as a separate deployment name.
-		ProviderAzureAI: setOf("gpt-oss-120b", "gpt-chat-latest", "claude-opus-5-5-fast"),
+		// Foundry publishes each model's fast mode as a separate deployment
+		// name, where the vendor's own API takes fast as a request parameter
+		// ([ClaudeUsage.Speed]) on the base model.
+		ProviderAzureAI: setOf(
+			"gpt-oss-120b", "gpt-chat-latest",
+			"claude-opus-5-5-fast", "claude-fable-5-2-fast", "claude-mythos-5-2-fast",
+		),
 		// Azure-only OpenAI entries: models or dated variants OpenAI's direct
 		// key set no longer (or never) lists, still sold on Azure.
 		ProviderAzure: setOf(
-			"gpt-3.5-turbo-16k-0613", "gpt-4-0125-preview", "gpt-4-32k", "gpt-4-32k-0613",
-			"gpt-4-turbo-vision-preview", "gpt-4.5-preview",
-			"gpt-4o-realtime-preview-2024-10-01", "gpt-4o-realtime-preview-2024-12-17",
+			"gpt-4-0125-preview",
+			"gpt-4-turbo-vision-preview",
+			"gpt-4o-realtime-preview-2024-12-17",
 			"gpt-5.1-chat", "gpt-5.2-chat", "gpt-5.3-chat",
 			// See the azure_ai note above: "chat-latest" with an Azure-only prefix.
 			"gpt-chat-latest",
