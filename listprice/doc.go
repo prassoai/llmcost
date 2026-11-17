@@ -22,6 +22,9 @@
 //
 // # Published models
 //
+// GPT-6.2 Astra, Astra Law, and Sol publish standard rates; Astra and Sol
+// also publish priority rates. Unpublished service tiers remain unpriceable.
+//
 // The book publishes a curated set of models by name, each mapped to the
 // llmcost key that prices it. [Book] enumerates the rate card — published
 // models first, then every other first-party key llmcost prices — as exact
