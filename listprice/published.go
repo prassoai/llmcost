@@ -1,6 +1,10 @@
 package listprice
 
-import "github.com/prassoai/llmcost"
+import (
+	"sync"
+
+	"github.com/prassoai/llmcost"
+)
 
 // published is the curated set of models sold by name, in the order the
 // price page lists them. An entry whose key the vendored data no longer
@@ -38,4 +42,7 @@ var published = []model{
 // published model prices from LiteLLM.
 var overrides = map[string]override{}
 
-var std = newBook(published, overrides)
+// std is the price book, built on first use: building it loads and indexes
+// the vendored rates, which every program importing this package would
+// otherwise pay at start whether or not it prices anything.
+var std = sync.OnceValue(func() *book { return newBook(published, overrides) })

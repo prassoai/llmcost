@@ -73,13 +73,13 @@ func Markup(cost llmcost.Nls) llmcost.Nls {
 // answer. Nothing else degrades: an unknown model, an unpriced service tier
 // or an unpriced fast mode is ok=false, and those are what [Priceable]
 // refuses before a call is made. Impossible counts panic, as in llmcost.
-func Of(model string, u llmcost.Usage) (Price, bool) { return std.of(model, u) }
+func Of(model string, u llmcost.Usage) (Price, bool) { return std().of(model, u) }
 
 // Priceable reports whether a request for model at tier and speed (the
 // Anthropic speed parameter: "" or "fast") can be list-priced, before any
 // usage exists. A request it rejects would have no published price.
 func Priceable(model string, tier llmcost.ServiceTier, speed string) bool {
-	return std.priceable(model, tier, speed)
+	return std().priceable(model, tier, speed)
 }
 
 // Version identifies a price book: this module's version as the consuming

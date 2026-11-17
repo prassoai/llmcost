@@ -84,14 +84,14 @@ type ProviderCost struct {
 // sorted. Each model contributes a row per service tier, speed, context tier
 // and priced component. It covers everything [Of] prices at a base inference
 // geo, so a model it lists no rate for has no list price.
-func Book() []Rate { return std.rates() }
+func Book() []Rate { return std().rates() }
 
 // Costs enumerates what every provider llmcost prices charges for the book's
 // models, in [Book]'s model order and, per model, its pricing provider first.
 // A provider appears for a model when its global (unregioned) key for the
 // model resolves: [llmcost.ModelSelector] maps the pricing key's vendor name
 // onto each cloud's own naming.
-func Costs() []ProviderCost { return std.costs() }
+func Costs() []ProviderCost { return std().costs() }
 
 // pricers are the providers whose models the book prices, in order.
 var pricers = []llmcost.Provider{llmcost.ProviderAnthropic, llmcost.ProviderOpenAI}

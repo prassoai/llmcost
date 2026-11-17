@@ -32,7 +32,8 @@ type book struct {
 
 // newBook panics on a malformed curation — a duplicate id, a provider the
 // book does not list, or anything [llmcost.New] rejects — because a price
-// book that cannot be built must fail at init, not price. A published model
+// book that cannot be built must never price; this package's tests build the
+// curated book, so such a curation cannot pass CI. A published model
 // whose key its provider no longer bills is suppressed rather than rejected:
 // the vendored data removed the model, so it drops out of the book like any
 // other. Suppressing its id, not just leaving out its alias, keeps an id that
