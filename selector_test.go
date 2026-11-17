@@ -333,6 +333,10 @@ func TestSelectorCanonicalVendorNames(t *testing.T) {
 			"claude-instant-v1", "claude-v1", "claude-v2:1",
 			// Open-weight OpenAI models, never served on api.openai.com.
 			"gpt-oss-120b", "gpt-oss-20b", "gpt-oss-safeguard-120b", "gpt-oss-safeguard-20b",
+			// OpenAI's direct API serves Daybreak Blue only under the rolling
+			// alias gpt-daybreak-blue-latest; Bedrock serves only the pinned
+			// id openai.gpt-daybreak-blue-5.6-sol, at the same rates.
+			"gpt-daybreak-blue-5.6-sol",
 		),
 		ProviderVertexAI: setOf(
 			"claude-3-5-haiku", "claude-3-5-haiku-20241022", "claude-3-5-sonnet", "claude-3-5-sonnet-20240620",
