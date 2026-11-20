@@ -155,7 +155,7 @@ modeled.
   1,000 searches on every key Anthropic or OpenAI bills — owned here, not read
   from LiteLLM's per-model `search_context_cost_per_query`. OpenAI's
   `web_search_preview` tool (`OpenAIUsage.WebSearchPreview`), gpt-4o-mini and
-  gpt-4.1-mini (fixed 8,000-token search blocks), and keys other providers
+  gpt-4.1-mini (fixed 8,000-token search blocks, `FixedBlockSearch`), and keys other providers
   bill price no search: usage reporting one fails.
 
 `RatesFor(model, tier)` exposes the raw per-token
@@ -185,7 +185,9 @@ and per million searches for the `ComponentWebSearch` row of a model that
 prices hosted web search: one price per model whichever provider serves it,
 beside the cost of the provider that sets it. It leaves out OpenAI's Chat
 Completions search models (`listprice.ChatSearchModel`), which search on every
-request without reporting a count, and `Of` and `Priceable` refuse them. `listprice.Costs()` enumerates every provider's cost
+request without reporting a count, and `Of` and `Priceable` refuse them.
+`listprice.SearchRefused` names the models that run the search tool but have
+no search price (gpt-4o-mini, gpt-4.1-mini). `listprice.Costs()` enumerates every provider's cost
 for those models — Bedrock, Vertex AI, Azure and Fireworks included — for
 audit tables. See `docs/finished/DESIGN_LIST_PRICE.md`.
 

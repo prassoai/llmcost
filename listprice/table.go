@@ -85,11 +85,7 @@ func billed(m model, overrides map[string]override) bool {
 }
 
 func (b *book) source(model string) Source {
-	key, ok := b.aliases[model]
-	if !ok {
-		key = model
-	}
-	if _, ok := b.overrides[key]; ok {
+	if _, ok := b.overrides[b.key(model)]; ok {
 		return SourceOverride
 	}
 	return SourceLLMCost
@@ -176,3 +172,23 @@ var chatSearchModel = regexp.MustCompile(`-search-(preview|api)(-\d{4}-\d{2}-\d{
 // has no price for them: [Book] leaves them out and [Of] and [Priceable]
 // refuse them. A gateway uses it to name the refusal before a call.
 func ChatSearchModel(model string) bool { return chatSearchModel.MatchString(model) }
+
+// SearchRefused reports whether model runs its provider's hosted web search
+// tool but the book prices none of its searches: OpenAI bills search content
+// on it as a fixed block of input tokens ([llmcost.FixedBlockSearch]), so [Of]
+// cannot charge a call that searched and a caller refuses one. A model whose
+// endpoint has no search tool at all, such as a legacy completion model, is
+// not refused search; it cannot search on any key.
+func SearchRefused(model string) bool { return std.searchRefused(model) }
+
+func (b *book) searchRefused(model string) bool {
+	r, ok := b.table.RatesFor(model, llmcost.TierStandard)
+	return ok && r.WebSearch == nil && llmcost.FixedBlockSearch(b.key(model))
+}
+
+func (b *book) key(model string) string {
+	if key, ok := b.aliases[model]; ok {
+		return key
+	}
+	return model
+}

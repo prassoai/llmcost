@@ -35,8 +35,10 @@
 // USD per million tokens, and its hosted web search fee as USD per million
 // searches ([ComponentWebSearch]). [ChatSearchModel] names OpenAI's Chat
 // Completions search models, which the book leaves out: they search on every
-// request and report no count to charge. A model has one list price whichever provider
-// serves it, set by the cost of its pricing provider ([Rate.PricedBy]). [Costs]
+// request and report no count to charge. [SearchRefused] names the models
+// that run the search tool but have no search price, because their search
+// content bills as a fixed block of input tokens. A model has one list price
+// whichever provider serves it, set by the cost of its pricing provider ([Rate.PricedBy]). [Costs]
 // enumerates what each provider charges for the same models, so a price can
 // be read beside every cost it could be served at.
 //

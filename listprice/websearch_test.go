@@ -190,3 +190,25 @@ func TestChatSearchModelsHaveNoPrice(t *testing.T) {
 		}
 	}
 }
+
+// TestSearchRefused requires SearchRefused to name exactly the models that
+// can search but have no search price. A price page lists them as needing the
+// customer's own key, which is only true of a model whose endpoint has a
+// search tool: legacy completion models also lack a search price but cannot
+// search on any key, and models with a price are not refused.
+func TestSearchRefused(t *testing.T) {
+	for m, want := range map[string]bool{
+		"gpt-4o-mini": true, "gpt-4o-mini-2024-07-18": true, "gpt-4.1-mini": true, "gpt-4.1-mini-2025-04-14": true,
+		"babbage-002": false, "davinci-002": false, "gpt-3.5-turbo-instruct": false,
+		"gpt-5.5": false, "claude-opus-5-5": false, "gpt-4o-mini-search-preview": false, "no-such-model": false,
+	} {
+		if got := SearchRefused(m); got != want {
+			t.Errorf("SearchRefused(%s) = %v, want %v", m, got, want)
+		}
+	}
+	for _, r := range Book() {
+		if SearchRefused(r.Model) && r.Component == ComponentWebSearch {
+			t.Errorf("%s: refused search but the book prices it", r.Model)
+		}
+	}
+}

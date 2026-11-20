@@ -857,15 +857,18 @@ func parseProviderMultipliers(fields map[string]json.RawMessage) (fast *big.Rat,
 // 1,000 searches on every model.
 var webSearchFees = map[string]*big.Rat{"anthropic": big.NewRat(1, 100), "openai": big.NewRat(1, 100)}
 
-// fixedBlockSearch matches the OpenAI models whose web_search content OpenAI
-// bills as a fixed 8,000-input-token block per call rather than as the
-// content's own tokens; their searches are not priced.
 var fixedBlockSearch = regexp.MustCompile(`^(gpt-4o-mini|gpt-4\.1-mini)(-\d{4}-\d{2}-\d{2})?$`)
+
+// FixedBlockSearch reports whether key is one of the OpenAI models whose
+// web_search content OpenAI bills as a fixed 8,000-input-token block per call
+// rather than as the content's own tokens. Their searches are not priced: the
+// key's [Rates.WebSearch] is nil.
+func FixedBlockSearch(key string) bool { return fixedBlockSearch.MatchString(key) }
 
 // webSearchFee is a fresh copy of the search fee for a key that provider
 // bills, or nil when it prices no search.
 func webSearchFee(provider, model string) *big.Rat {
-	if provider == "openai" && fixedBlockSearch.MatchString(model) {
+	if provider == "openai" && FixedBlockSearch(model) {
 		return nil
 	}
 	return cpRat(webSearchFees[provider])
