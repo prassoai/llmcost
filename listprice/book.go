@@ -93,7 +93,7 @@ type ProviderCost struct {
 // the model prices hosted web search. It covers everything [Of] prices at a
 // base inference geo, so a model it lists no rate for has no list price, and
 // a model with no web search row refuses searches. It leaves out every
-// [ChatSearchModel].
+// OpenAI [ChatSearchModel].
 func Book() []Rate { return std.rates() }
 
 // Costs enumerates what every provider llmcost prices charges for the book's
@@ -145,7 +145,7 @@ func (b *book) entries() []entry {
 		}
 		slices.Sort(keys)
 		for _, k := range keys {
-			if !covered[k] && !ChatSearchModel(k) {
+			if !covered[k] && !(p == llmcost.ProviderOpenAI && ChatSearchModel(k)) {
 				out = append(out, entry{model{k, k, p}, false})
 			}
 		}

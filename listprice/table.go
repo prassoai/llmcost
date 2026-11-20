@@ -32,7 +32,8 @@ type book struct {
 }
 
 // newBook panics on a malformed curation — a duplicate id, a provider the
-// book does not list, or anything [llmcost.New] rejects — because a price
+// book does not list, an OpenAI [ChatSearchModel] it publishes or overrides,
+// or anything [llmcost.New] rejects — because a price
 // book that cannot be built must fail at init, not price. A published model
 // whose key its provider no longer bills is suppressed rather than rejected:
 // the vendored data removed the model, so it drops out of the book like any
@@ -41,6 +42,9 @@ type book struct {
 func newBook(published []model, overrides map[string]override) *book {
 	rates := make(map[string]*llmcost.Rates, len(overrides))
 	for key, o := range overrides {
+		if o.provider == llmcost.ProviderOpenAI && ChatSearchModel(key) {
+			panic(fmt.Sprintf("listprice: override %q is a Chat Completions search model", key))
+		}
 		rates[key] = &o.rates
 	}
 	aliases := map[string]string{}
@@ -51,6 +55,8 @@ func newBook(published []model, overrides map[string]override) *book {
 			panic(fmt.Sprintf("listprice: model %q is published twice", m.id))
 		case !slices.Contains(pricers, m.provider):
 			panic(fmt.Sprintf("listprice: model %q has unlisted provider %q", m.id, m.provider))
+		case m.provider == llmcost.ProviderOpenAI && (ChatSearchModel(m.id) || ChatSearchModel(m.key)):
+			panic(fmt.Sprintf("listprice: model %q is a Chat Completions search model", m.id))
 		case !billed(m, overrides):
 			rates[m.id] = nil
 		case m.id != m.key:

@@ -4,6 +4,7 @@ import (
 	"math"
 	"math/big"
 	"regexp"
+	"slices"
 	"testing"
 
 	"github.com/prassoai/llmcost"
@@ -199,4 +200,47 @@ func TestNewBookRejectsDuplicates(t *testing.T) {
 		}
 	}()
 	newBook([]model{{"gpt-5.5", "gpt-5.5", llmcost.ProviderOpenAI}, {"gpt-5.5", "gpt-5.5", llmcost.ProviderOpenAI}}, nil)
+}
+
+// TestNewBookRejectsChatSearchCuration requires curating an OpenAI Chat
+// Completions search model to fail at init: the book refuses every one, so
+// publishing or overriding one would price a model the gateway refuses.
+func TestNewBookRejectsChatSearchCuration(t *testing.T) {
+	rates := llmcost.Rates{Base: llmcost.TierRates{Input: llmcost.MustParseRat("1e-6"), Output: llmcost.MustParseRat("2e-6")}}
+	for name, build := range map[string]func(){
+		"published": func() {
+			newBook([]model{{"gpt-5-search-api", "gpt-5-search-api", llmcost.ProviderOpenAI}}, nil)
+		},
+		"aliased": func() {
+			newBook([]model{{"acme-search", "gpt-5-search-api", llmcost.ProviderOpenAI}}, nil)
+		},
+		"overridden": func() {
+			newBook(nil, map[string]override{"acme-search-api": {llmcost.ProviderOpenAI, rates}})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Error("newBook accepted a Chat Completions search model")
+				}
+			}()
+			build()
+		})
+	}
+}
+
+// TestChatSearchExclusionIsOpenAIOnly requires a non-OpenAI key that happens
+// to match ChatSearchModel's spelling to stay in the book: only OpenAI's
+// search models are refused, so excluding another provider's would hide a
+// model Of still prices.
+func TestChatSearchExclusionIsOpenAIOnly(t *testing.T) {
+	b := newBook(nil, map[string]override{"acme-search-api": {llmcost.ProviderAnthropic, llmcost.Rates{Base: llmcost.TierRates{
+		Input: llmcost.MustParseRat("1e-6"), Output: llmcost.MustParseRat("2e-6"),
+	}}}})
+	if _, ok := b.of("acme-search-api", llmcost.ClaudeUsage{InputTokens: 1_000}); !ok {
+		t.Fatal("of(acme-search-api) unpriced")
+	}
+	if !slices.ContainsFunc(b.rates(), func(r Rate) bool { return r.Model == "acme-search-api" }) {
+		t.Error("book leaves out an Anthropic key spelled like a search model")
+	}
 }
