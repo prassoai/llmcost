@@ -43,9 +43,17 @@ func (s Source) String() string {
 
 // Price is one call's list price and the provider cost it derives from, in
 // nls. Price is always [Markup](Cost).
+//
+// Cost and Price are all-in: tokens plus any hosted web search fees.
+// WebSearchCost and WebSearchPrice are the web search part of each, so the
+// tokens' part is Cost-WebSearchCost and Price-WebSearchPrice. WebSearchPrice
+// is [Markup](WebSearchCost); every vendored search fee is a whole multiple
+// of 20 nls, which the markup maps to whole nls, so marking the parts up
+// separately sums to exactly the marked-up total.
 type Price struct {
-	Cost, Price llmcost.Nls
-	Source      Source
+	Cost, Price                   llmcost.Nls
+	WebSearchCost, WebSearchPrice llmcost.Nls
+	Source                        Source
 }
 
 // Markup returns the list price of cost: cost plus [MarkupBasisPoints],
@@ -68,7 +76,8 @@ func Markup(cost llmcost.Nls) llmcost.Nls {
 // A call whose usage prices exactly is [SourceLLMCost] or [SourceOverride].
 // A call that cannot is re-priced with the response-reported dimensions a
 // request cannot foresee dropped — Anthropic's inference_geo to the base
-// rate, 1-hour cache writes to the 5-minute rate — and is [SourceDegraded]:
+// rate, 1-hour cache writes to the 5-minute rate, web searches on a model
+// with no search fee to free — and is [SourceDegraded]:
 // the call was already made, and recording it as free would be the one wrong
 // answer. Nothing else degrades: an unknown model, an unpriced service tier
 // or an unpriced fast mode is ok=false, and those are what [Priceable]

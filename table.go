@@ -141,6 +141,9 @@ func validateOverrideRates(model string, tier ServiceTier, r Rates) {
 	if r.Fast != nil && r.Fast.Sign() <= 0 {
 		panic(fmt.Sprintf("llmcost: %s/%s: non-positive fast multiplier", model, tier))
 	}
+	if r.WebSearch != nil && r.WebSearch.Sign() <= 0 {
+		panic(fmt.Sprintf("llmcost: %s/%s: non-positive web search fee", model, tier))
+	}
 	for key, f := range r.Geo {
 		if f == nil || f.Sign() <= 0 {
 			panic(fmt.Sprintf("llmcost: %s/%s: non-positive geo multiplier %q", model, tier, key))
@@ -161,6 +164,7 @@ func (r Rates) clone() Rates {
 		Fast:            cpRat(r.Fast),
 		Geo:             cloneRatMap(r.Geo),
 		RegionalUplift:  cloneRatMap(r.RegionalUplift),
+		WebSearch:       cpRat(r.WebSearch),
 		litellmProvider: r.litellmProvider,
 	}
 	if len(r.Tiers) > 0 {

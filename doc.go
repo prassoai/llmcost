@@ -149,6 +149,19 @@
 // Multipliers scale the tier-resolved rates; tier selection itself is a
 // pure function of token counts.
 //
+// # Hosted web search
+//
+// Provider-hosted web search bills a flat fee per search on top of the
+// tokens: [ClaudeUsage.WebSearchRequests] takes Anthropic's
+// usage.server_tool_use.web_search_requests, and
+// [OpenAIUsage.WebSearchRequests] the billable searches OpenAI's web search
+// tool ran (its "search" actions). Each prices at [Rates.WebSearch] —
+// LiteLLM's search_context_cost_per_query, $10 per 1,000 searches on current
+// Anthropic and GPT-5+ models — and no fast, geo, residency, service or
+// context tier scales it. Search results and search content already count
+// as the response's input tokens. A model without a search fee fails to
+// price usage that reports searches, as for any other unpriced component.
+//
 // # Precision and rounding
 //
 // LiteLLM rates are tiny USD-per-token decimals, so a single token costs a

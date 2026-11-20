@@ -84,30 +84,61 @@ func (b *book) source(model string) Source {
 }
 
 func (b *book) of(model string, u llmcost.Usage) (Price, bool) {
-	if c, ok := b.table.Cost(model, u); ok {
-		return Price{Cost: c, Price: Markup(c), Source: b.source(model)}, true
-	}
-	for _, d := range degraded(u) {
-		if c, ok := b.table.Cost(model, d); ok {
-			return Price{Cost: c, Price: Markup(c), Source: SourceDegraded}, true
+	for i, d := range append([]llmcost.Usage{u}, degraded(u)...) {
+		c, ok := b.table.Cost(model, d)
+		if !ok {
+			continue
 		}
+		// Dropping a component never makes usage that priced unpriceable.
+		tokens, _ := b.table.Cost(model, withoutWebSearch(d))
+		src := SourceDegraded
+		if i == 0 {
+			src = b.source(model)
+		}
+		return Price{Cost: c, Price: Markup(c), WebSearchCost: c - tokens, WebSearchPrice: Markup(c - tokens), Source: src}, true
 	}
 	return Price{}, false
 }
 
 // degraded lists u's re-pricings with the response-reported dimensions
 // dropped, least lossy first: Anthropic's geo, its 1-hour cache-write split,
-// then both. Other usage has no such dimension.
+// both, then each of those with the web searches dropped as well. OpenAI
+// usage drops only its web searches; Fireworks usage has no such dimension.
 func degraded(u llmcost.Usage) []llmcost.Usage {
-	c, ok := u.(llmcost.ClaudeUsage)
-	if !ok {
-		return nil
+	switch u := u.(type) {
+	case llmcost.ClaudeUsage:
+		var out []llmcost.Usage
+		for drop := 1; drop < 8; drop++ {
+			d := u
+			if drop&1 != 0 {
+				d.InferenceGeo = ""
+			}
+			if drop&2 != 0 {
+				d.CacheCreation1hInputTokens = 0
+			}
+			if drop&4 != 0 {
+				d.WebSearchRequests = 0
+			}
+			out = append(out, d)
+		}
+		return out
+	case llmcost.OpenAIUsage:
+		return []llmcost.Usage{withoutWebSearch(u)}
 	}
-	noGeo, no1h := c, c
-	noGeo.InferenceGeo, no1h.CacheCreation1hInputTokens = "", 0
-	neither := noGeo
-	neither.CacheCreation1hInputTokens = 0
-	return []llmcost.Usage{noGeo, no1h, neither}
+	return nil
+}
+
+// withoutWebSearch is u with its web searches dropped: the call's tokens alone.
+func withoutWebSearch(u llmcost.Usage) llmcost.Usage {
+	switch u := u.(type) {
+	case llmcost.ClaudeUsage:
+		u.WebSearchRequests = 0
+		return u
+	case llmcost.OpenAIUsage:
+		u.WebSearchRequests = 0
+		return u
+	}
+	return u
 }
 
 func (b *book) priceable(model string, tier llmcost.ServiceTier, speed string) bool {
