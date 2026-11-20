@@ -147,6 +147,17 @@ modeled.
   test that each resolves — that test is your guarantee that a data sync
   can't silently drop a model you depend on.
 
+- **Hosted web search is the provider's per-search fee.** `ClaudeUsage.WebSearchRequests`
+  (`usage.server_tool_use.web_search_requests`) and
+  `OpenAIUsage.WebSearchRequests` (`tool_usage.web_search.num_requests`)
+  each bill `Rates.WebSearch` on top of the tokens, unscaled by any mode or
+  tier. The fee is the provider's list price for its standard tool — $10 per
+  1,000 searches on every key Anthropic or OpenAI bills — owned here, not read
+  from LiteLLM's per-model `search_context_cost_per_query`. OpenAI's
+  `web_search_preview` tool (`OpenAIUsage.WebSearchPreview`), gpt-4o-mini and
+  gpt-4.1-mini (fixed 8,000-token search blocks), and keys other providers
+  bill price no search: usage reporting one fails.
+
 `RatesFor(model, tier)` exposes the raw per-token
 rates — base and tiers — for callers that want them. `Models(provider)` lists
 every key a first-party provider prices, sorted, and `LiteLLMCommit()` is the
@@ -157,7 +168,9 @@ full contract.
 
 `listprice` is the inference price book shared by murmur and Macroscope: a
 call's list price is its llmcost cost plus `MarkupBasisPoints` (5%), rounded up
-to a whole nls.
+to a whole nls. `Price.WebSearchCost` and `Price.WebSearchPrice` are the
+web search fees inside `Cost` and `Price`; each fee is a whole multiple of 20
+nls, so the token and search parts sum exactly to the marked-up total.
 
 ```go
 p, ok := listprice.Of("claude-opus-5", usage) // p.Cost, p.Price, p.Source

@@ -84,20 +84,38 @@ func (b *book) source(model string) Source {
 }
 
 func (b *book) of(model string, u llmcost.Usage) (Price, bool) {
-	if c, ok := b.table.Cost(model, u); ok {
-		return Price{Cost: c, Price: Markup(c), Source: b.source(model)}, true
+	if p, ok := b.price(model, u, b.source(model)); ok {
+		return p, true
 	}
 	for _, d := range degraded(u) {
-		if c, ok := b.table.Cost(model, d); ok {
-			return Price{Cost: c, Price: Markup(c), Source: SourceDegraded}, true
+		if p, ok := b.price(model, d, SourceDegraded); ok {
+			return p, true
 		}
 	}
 	return Price{}, false
 }
 
+// price is u's all-in price, with the part its web searches take. A call
+// that searched is priced twice — all-in and tokens alone — and the
+// difference is the search fee; one that did not has no search part.
+func (b *book) price(model string, u llmcost.Usage, src Source) (Price, bool) {
+	c, ok := b.table.Cost(model, u)
+	if !ok {
+		return Price{}, false
+	}
+	p := Price{Cost: c, Price: Markup(c), Source: src}
+	if tokens, searched := withoutWebSearch(u); searched {
+		t, _ := b.table.Cost(model, tokens) // dropping a component never makes usage that priced unpriceable
+		p.WebSearchCost, p.WebSearchPrice = c-t, Markup(c-t)
+	}
+	return p, true
+}
+
 // degraded lists u's re-pricings with the response-reported dimensions
 // dropped, least lossy first: Anthropic's geo, its 1-hour cache-write split,
-// then both. Other usage has no such dimension.
+// then both. Other usage has no such dimension. Web searches are not one: the
+// request declares the search tool, so a caller refuses an unpriceable one
+// before the call, like an unpriced service tier.
 func degraded(u llmcost.Usage) []llmcost.Usage {
 	c, ok := u.(llmcost.ClaudeUsage)
 	if !ok {
@@ -108,6 +126,20 @@ func degraded(u llmcost.Usage) []llmcost.Usage {
 	neither := noGeo
 	neither.CacheCreation1hInputTokens = 0
 	return []llmcost.Usage{noGeo, no1h, neither}
+}
+
+// withoutWebSearch is u with its web searches dropped — the call's tokens
+// alone — and whether it reported any.
+func withoutWebSearch(u llmcost.Usage) (llmcost.Usage, bool) {
+	switch v := u.(type) {
+	case llmcost.ClaudeUsage:
+		v.WebSearchRequests = 0
+		return v, v != u
+	case llmcost.OpenAIUsage:
+		v.WebSearchRequests, v.WebSearchPreview = 0, false
+		return v, v != u
+	}
+	return u, false
 }
 
 func (b *book) priceable(model string, tier llmcost.ServiceTier, speed string) bool {

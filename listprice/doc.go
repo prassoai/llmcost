@@ -6,6 +6,9 @@
 //
 //	price = ceil(cost × (10000 + MarkupBasisPoints) / 10000)
 //
+// A call's cost and price are all-in — tokens plus any provider-hosted web
+// search fees — and [Price] carries the web search part of each separately.
+//
 // [Of] prices a call; [Markup] re-derives a price from a recorded cost.
 // [Priceable] answers before the call whether a model, service tier and
 // speed have a list price at all, so a caller can refuse instead of serving
@@ -16,8 +19,9 @@
 // A price comes from the vendored LiteLLM rates ([SourceLLMCost]), from a
 // curated override restating rates LiteLLM lacks or gets wrong
 // ([SourceOverride]), or — for response-only dimensions such as an inference
-// geo or a 1-hour cache write the model has no rate for — from the base rate
-// ([SourceDegraded]), because a call that already happened is never free.
+// geo, a 1-hour cache write, or web searches the model has no rate for — from
+// the rest of the call's rates with that dimension dropped ([SourceDegraded]),
+// because a call that already happened is never free.
 // Request-time modes (model, service tier, fast mode) never degrade.
 //
 // # Published models

@@ -85,6 +85,13 @@ const (
 // unrecognized Speed value — fails to price rather than billing standard
 // rates: those premiums reach 6×, and silently dropping one is exactly the
 // kind of underbilling this module exists to prevent.
+//
+// WebSearchRequests is usage.server_tool_use.web_search_requests: the
+// searches Anthropic's hosted web search tool ran for the response, every
+// tool version. Each bills Anthropic's per-search fee ([Rates.WebSearch], $10
+// per 1,000) on top of the tokens — the search results already count as input
+// tokens. Anthropic does not bill a search that failed with an error, and
+// does not count it here. The fee is never scaled by fast mode or pinned geo.
 type ClaudeUsage struct {
 	InputTokens                int64
 	CacheReadInputTokens       int64
@@ -93,6 +100,7 @@ type ClaudeUsage struct {
 	OutputTokens               int64
 	Speed                      string
 	InferenceGeo               string
+	WebSearchRequests          int64
 }
 
 // OpenAIUsage holds the RAW token counts of one OpenAI API response, named
@@ -135,6 +143,22 @@ type ClaudeUsage struct {
 // model without rates at the tier, or an unrecognized tier value, fails to
 // price rather than billing standard rates (~2× off in either direction —
 // see [ServiceTier]).
+//
+// WebSearchRequests is the response's tool_usage.web_search.num_requests: the
+// billable searches the hosted web_search tool ran, which excludes discounted
+// searches and page opens. Each bills OpenAI's per-search fee for the tool
+// ([Rates.WebSearch], $10 per 1,000 on every model) on top of the tokens;
+// search content tokens are the ordinary input they are already counted in.
+// The fee is never scaled by service tier, data residency or context-window
+// tier.
+//
+// WebSearchPreview marks searches run by the web_search_preview tool instead.
+// Its fee depends on the model — $25 per 1,000 with free content tokens on
+// non-reasoning models — and this module does not price it, so usage
+// reporting preview searches fails to price rather than billing the standard
+// tool's fee. So do searches on gpt-4o-mini and gpt-4.1-mini, whose search
+// content OpenAI bills as a fixed 8,000-token block per call that the
+// reported input does not promise to contain.
 type OpenAIUsage struct {
 	InputTokens       int64
 	CachedInputTokens int64
@@ -142,6 +166,8 @@ type OpenAIUsage struct {
 	OutputTokens      int64
 	ServiceTier       ServiceTier
 	DataResidency     string
+	WebSearchRequests int64
+	WebSearchPreview  bool
 }
 
 // FireworksUsage holds the RAW token counts of one Fireworks AI response.
@@ -214,12 +240,24 @@ type Tier struct {
 // regional_processing_uplift_multiplier_<region>, a flat uplift on ALL token
 // costs — cache included — for requests served by a regionalized host. Nil
 // or missing entries mean the model does not price that mode.
+//
+// WebSearch is the exact USD fee per hosted web search. It is the provider's
+// list fee for its standard search tool, owned here rather than read from
+// LiteLLM — whose per-model search_context_cost_per_query is missing for
+// models the tool serves (gpt-5.4) and carries the retired preview tool's fee
+// for others — and it is set on every key whose litellm_provider is
+// "anthropic" or "openai" (see webSearchFees), at every service tier. Nil
+// means the key does not price web search — another serving provider, or an
+// OpenAI model whose search content bills differently — and usage reporting
+// searches on it fails to price. The fee is flat: no context tier, multiplier
+// or service tier scales it.
 type Rates struct {
 	Base           TierRates
 	Tiers          []Tier // ascending by AbovePromptTokens; empty when untiered
 	Fast           *big.Rat
 	Geo            map[string]*big.Rat
 	RegionalUplift map[string]*big.Rat
+	WebSearch      *big.Rat
 
 	// litellmProvider is the entry's upstream litellm_provider value —
 	// which service bills this key. [ModelSelector.Key] checks it so a
@@ -292,7 +330,7 @@ func Cost(model string, u Usage) (Nls, bool) {
 }
 
 func (u ClaudeUsage) disjoint() components {
-	if u.InputTokens < 0 || u.CacheReadInputTokens < 0 || u.CacheCreationInputTokens < 0 || u.CacheCreation1hInputTokens < 0 || u.OutputTokens < 0 {
+	if u.InputTokens < 0 || u.CacheReadInputTokens < 0 || u.CacheCreationInputTokens < 0 || u.CacheCreation1hInputTokens < 0 || u.OutputTokens < 0 || u.WebSearchRequests < 0 {
 		panic(fmt.Sprintf("llmcost: negative token counts: %+v", u))
 	}
 	if u.CacheCreation1hInputTokens > u.CacheCreationInputTokens {
@@ -304,6 +342,7 @@ func (u ClaudeUsage) disjoint() components {
 		cacheCreation:   u.CacheCreationInputTokens - u.CacheCreation1hInputTokens,
 		cacheCreation1h: u.CacheCreation1hInputTokens,
 		output:          u.OutputTokens,
+		webSearch:       u.WebSearchRequests,
 	}
 }
 
@@ -343,7 +382,7 @@ func (u ClaudeUsage) premium(r Rates) (premium, bool) {
 func (u ClaudeUsage) tier() (ServiceTier, bool) { return TierStandard, true }
 
 func (u OpenAIUsage) disjoint() components {
-	if u.InputTokens < 0 || u.CachedInputTokens < 0 || u.CacheWriteTokens < 0 || u.OutputTokens < 0 {
+	if u.InputTokens < 0 || u.CachedInputTokens < 0 || u.CacheWriteTokens < 0 || u.OutputTokens < 0 || u.WebSearchRequests < 0 {
 		panic(fmt.Sprintf("llmcost: negative token counts: %+v", u))
 	}
 	if u.CachedInputTokens+u.CacheWriteTokens > u.InputTokens {
@@ -354,6 +393,7 @@ func (u OpenAIUsage) disjoint() components {
 		cacheRead:     u.CachedInputTokens,
 		cacheCreation: u.CacheWriteTokens, // OpenAI has a single cache-write TTL; no 1h split
 		output:        u.OutputTokens,
+		webSearch:     u.WebSearchRequests,
 	}
 }
 
@@ -362,6 +402,9 @@ func (u OpenAIUsage) disjoint() components {
 // writes included. A region the model has no uplift for bills at standard rates
 // (see the DataResidency field doc for why absent ≠ unpriced here).
 func (u OpenAIUsage) premium(r Rates) (premium, bool) {
+	if u.WebSearchPreview && u.WebSearchRequests > 0 {
+		return premium{}, false // the preview tool's model-dependent fee is not priced
+	}
 	if f, ok := r.RegionalUplift[strings.ToLower(u.DataResidency)]; ok {
 		return premium{tokens: f, cache: f}, true
 	}
@@ -420,9 +463,10 @@ func RatesFor(model string, tier ServiceTier) (Rates, bool) {
 
 // components are one response's token counts normalized to disjoint billable
 // parts: input is UNCACHED input only, cacheCreation is 5-minute-TTL writes
-// only (the 1h subset already split out into cacheCreation1h).
+// only (the 1h subset already split out into cacheCreation1h). webSearch
+// counts hosted web searches, billed per search rather than per token.
 type components struct {
-	input, cacheRead, cacheCreation, cacheCreation1h, output int64
+	input, cacheRead, cacheCreation, cacheCreation1h, output, webSearch int64
 }
 
 // promptTokens is the request's total prompt size — the context-window tier
@@ -451,6 +495,7 @@ func cost(r Rates, c components, p premium) (Nls, bool) {
 		{t.CacheCreation, c.cacheCreation, p.cache},
 		{t.CacheCreation1h, c.cacheCreation1h, p.cache},
 		{t.Output, c.output, p.tokens},
+		{r.WebSearch, c.webSearch, nil}, // a flat per-search fee: never tiered or scaled
 	} {
 		if part.tokens == 0 {
 			continue
@@ -551,6 +596,10 @@ func Parse(data []byte) (*Snapshot, error) {
 	models := make(map[string]map[ServiceTier]Rates, len(raw))
 	for model, spec := range raw {
 		if m, ok := parseModel(spec); ok {
+			for tier, r := range m {
+				r.WebSearch = webSearchFee(r.litellmProvider, model)
+				m[tier] = r
+			}
 			models[model] = m
 		}
 	}
@@ -800,6 +849,26 @@ func parseProviderMultipliers(fields map[string]json.RawMessage) (fast *big.Rat,
 		geo[strings.ToLower(key)] = f
 	}
 	return fast, geo
+}
+
+// webSearchFees are the providers' list fees per search of their standard
+// hosted web search tool, in USD, by the litellm_provider that bills a key:
+// Anthropic's web search tool and OpenAI's web_search tool are each $10 per
+// 1,000 searches on every model.
+var webSearchFees = map[string]*big.Rat{"anthropic": big.NewRat(1, 100), "openai": big.NewRat(1, 100)}
+
+// fixedBlockSearch matches the OpenAI models whose web_search content OpenAI
+// bills as a fixed 8,000-input-token block per call rather than as the
+// content's own tokens; their searches are not priced.
+var fixedBlockSearch = regexp.MustCompile(`^(gpt-4o-mini|gpt-4\.1-mini)(-\d{4}-\d{2}-\d{2})?$`)
+
+// webSearchFee is a fresh copy of the search fee for a key that provider
+// bills, or nil when it prices no search.
+func webSearchFee(provider, model string) *big.Rat {
+	if provider == "openai" && fixedBlockSearch.MatchString(model) {
+		return nil
+	}
+	return cpRat(webSearchFees[provider])
 }
 
 // ratField converts one JSON number field to an exact rational; nil if

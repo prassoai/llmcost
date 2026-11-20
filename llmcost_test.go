@@ -739,6 +739,9 @@ func TestTableInvariants(t *testing.T) {
 			if r.Fast != nil && r.Fast.Sign() <= 0 {
 				t.Errorf("%s/%s: non-positive fast multiplier", model, tier)
 			}
+			if r.WebSearch != nil && r.WebSearch.Sign() <= 0 {
+				t.Errorf("%s/%s: non-positive web search fee", model, tier)
+			}
 			for _, m := range []map[string]*big.Rat{r.Geo, r.RegionalUplift} {
 				for key, f := range m {
 					if f == nil || f.Sign() <= 0 {
