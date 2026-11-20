@@ -2,6 +2,7 @@ package listprice
 
 import (
 	"math/big"
+	"slices"
 	"testing"
 
 	"github.com/prassoai/llmcost"
@@ -93,6 +94,99 @@ func TestWebSearchFeesSplitExactly(t *testing.T) {
 		nls := new(big.Rat).Mul(r.WebSearch, big.NewRat(100_000, 1))
 		if !nls.IsInt() || new(big.Int).Rem(nls.Num(), big.NewInt(20)).Sign() != 0 {
 			t.Errorf("%s: web search fee %s USD is not a whole multiple of 20 nls", c.Key, r.WebSearch.FloatString(6))
+		}
+	}
+}
+
+// TestBookWebSearch requires the book to state the search fee [Of] charges:
+// a model and service tier carry a web search row exactly when Of prices a
+// search on them, and the row's price per million searches is a million
+// times what Of charges for one. Published models list OpenAI's and
+// Anthropic's $10 per 1,000 marked up to $10.50; gpt-4o-mini, whose search
+// content bills as a fixed token block, lists none.
+func TestBookWebSearch(t *testing.T) {
+	type at struct {
+		model string
+		tier  llmcost.ServiceTier
+	}
+	rows := map[at]*big.Rat{}
+	tiers := map[at]bool{}
+	for _, r := range Book() {
+		tiers[at{r.Model, r.Tier}] = true
+		if r.Component == ComponentWebSearch {
+			if r.Fast || r.AbovePromptTokens != 0 {
+				t.Errorf("%s %s: web search row at fast=%v above=%d, want one base row per tier", r.Model, r.Tier, r.Fast, r.AbovePromptTokens)
+			}
+			rows[at{r.Model, r.Tier}] = r.Price
+		}
+	}
+	searched := func(model string, tier llmcost.ServiceTier) (Price, bool) {
+		if tier == llmcost.TierStandard {
+			if p, ok := Of(model, llmcost.ClaudeUsage{InputTokens: 1, WebSearchRequests: 1}); ok {
+				return p, true
+			}
+		}
+		return Of(model, llmcost.OpenAIUsage{InputTokens: 1, ServiceTier: tier, WebSearchRequests: 1})
+	}
+	for k := range tiers {
+		p, ok := searched(k.model, k.tier)
+		row, listed := rows[k]
+		switch {
+		case ok != listed:
+			t.Errorf("%s %s: Of prices a search %v, book lists a search price %v", k.model, k.tier, ok, listed)
+		case listed && new(big.Rat).Mul(row, big.NewRat(1, 10)).Cmp(big.NewRat(p.WebSearchPrice, 1)) != 0:
+			t.Errorf("%s %s: book prices a million searches at $%s, Of charges %d nls for one", k.model, k.tier, row.FloatString(2), p.WebSearchPrice)
+		}
+	}
+	for _, m := range []string{"claude-opus-5-5", "gpt-5.5"} {
+		if got := rows[at{m, llmcost.TierStandard}]; got == nil || got.Cmp(big.NewRat(10_500, 1)) != 0 {
+			t.Errorf("%s: web search $%v per million searches, want $10,500", m, got)
+		}
+	}
+	if got, ok := rows[at{"gpt-4o-mini", llmcost.TierStandard}]; ok || !tiers[at{"gpt-4o-mini", llmcost.TierStandard}] {
+		t.Errorf("gpt-4o-mini: listed %v with web search price %v, want listed without one", tiers[at{"gpt-4o-mini", llmcost.TierStandard}], got)
+	}
+}
+
+// TestChatSearchModelsHaveNoPrice requires OpenAI's Chat Completions search
+// models to be absent from the book and refused by Of and Priceable: they
+// search on every request without reporting a count, so a gateway refuses
+// them on its own key, and the price page — rendered from the book — must not
+// list a model that key refuses. ChatSearchModel is the one predicate both
+// sides use.
+func TestChatSearchModelsHaveNoPrice(t *testing.T) {
+	var vendored []string
+	for _, k := range llmcost.Models(llmcost.ProviderOpenAI) {
+		if ChatSearchModel(k) {
+			vendored = append(vendored, k)
+		}
+	}
+	for _, m := range []string{"gpt-4o-search-preview", "gpt-4o-mini-search-preview", "gpt-5-search-api", "gpt-5-search-api-2025-10-14"} {
+		if !slices.Contains(vendored, m) {
+			t.Errorf("%s: not a vendored ChatSearchModel", m)
+		}
+	}
+	for _, r := range Book() {
+		if slices.Contains(vendored, r.Model) {
+			t.Errorf("book lists %s", r.Model)
+		}
+	}
+	for _, c := range Costs() {
+		if slices.Contains(vendored, c.Model) {
+			t.Errorf("costs list %s on %s", c.Model, c.Provider)
+		}
+	}
+	for _, m := range vendored {
+		if Priceable(m, llmcost.TierStandard, "") {
+			t.Errorf("%s is priceable", m)
+		}
+		if p, ok := Of(m, llmcost.OpenAIUsage{InputTokens: 1_000}); ok {
+			t.Errorf("Of(%s) = %+v, want unpriced", m, p)
+		}
+	}
+	for _, m := range []string{"gpt-5", "gpt-4o-mini", "gpt-5-search", "o3-deep-research"} {
+		if ChatSearchModel(m) {
+			t.Errorf("ChatSearchModel(%s) = true", m)
 		}
 	}
 }

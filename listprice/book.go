@@ -19,6 +19,10 @@ const (
 	// OpenAI's only cache write.
 	ComponentCacheWrite5m
 	ComponentCacheWrite1h
+	// ComponentWebSearch is a provider-hosted web search. Its unit is a
+	// search, not a token: the fee is flat per search, so a model rates it
+	// once per service tier, at standard speed and the base context tier.
+	ComponentWebSearch
 )
 
 func (c Component) String() string {
@@ -33,12 +37,14 @@ func (c Component) String() string {
 		return "cache_write_5m"
 	case ComponentCacheWrite1h:
 		return "cache_write_1h"
+	case ComponentWebSearch:
+		return "web_search"
 	}
 	return fmt.Sprintf("Component(%d)", c)
 }
 
-// Rate is one list price: what murmur charges per million tokens of one
-// component, for one model at one service tier, speed and context tier. A
+// Rate is one list price: what murmur charges per million units — tokens, or
+// searches for [ComponentWebSearch] — of one component, for one model at one service tier, speed and context tier. A
 // model has one price whichever provider serves it: the price is set by
 // PricedBy's cost, and every provider's own cost is a [ProviderCost].
 type Rate struct {
@@ -58,11 +64,12 @@ type Rate struct {
 	AbovePromptTokens int64
 	Component         Component
 	// Cost is PricedBy's cost and Price is Cost with [MarkupBasisPoints]
-	// applied, unrounded; both are exact USD per million tokens.
+	// applied, unrounded; both are exact USD per million of the component's
+	// units.
 	Cost, Price *big.Rat
 }
 
-// ProviderCost is what one provider charges per million tokens of one
+// ProviderCost is what one provider charges per million units of one
 // component, for one book model at one service tier, speed and context tier.
 type ProviderCost struct {
 	Provider llmcost.Provider
@@ -75,15 +82,18 @@ type ProviderCost struct {
 	Fast              bool
 	AbovePromptTokens int64
 	Component         Component
-	// Cost is exact USD per million tokens.
+	// Cost is exact USD per million of the component's units.
 	Cost *big.Rat
 }
 
 // Book enumerates the list prices, ordered by pricing provider, then the
 // published models in their curated order, then every other priceable key
 // sorted. Each model contributes a row per service tier, speed, context tier
-// and priced component. It covers everything [Of] prices at a base inference
-// geo, so a model it lists no rate for has no list price.
+// and priced component, and a [ComponentWebSearch] row per service tier when
+// the model prices hosted web search. It covers everything [Of] prices at a
+// base inference geo, so a model it lists no rate for has no list price, and
+// a model with no web search row refuses searches. It leaves out every
+// [ChatSearchModel].
 func Book() []Rate { return std.rates() }
 
 // Costs enumerates what every provider llmcost prices charges for the book's
@@ -135,7 +145,7 @@ func (b *book) entries() []entry {
 		}
 		slices.Sort(keys)
 		for _, k := range keys {
-			if !covered[k] {
+			if !covered[k] && !ChatSearchModel(k) {
 				out = append(out, entry{model{k, k, p}, false})
 			}
 		}
@@ -174,7 +184,8 @@ func (b *book) costs() []ProviderCost {
 }
 
 // priced lists provider p's costs for model, billed by key, at every service
-// tier, speed, context tier and component key prices.
+// tier, speed, context tier and component key prices, and its web search fee
+// once per service tier.
 func (b *book) priced(p llmcost.Provider, model, key string) []ProviderCost {
 	var out []ProviderCost
 	for _, tier := range []llmcost.ServiceTier{llmcost.TierStandard, llmcost.TierFlex, llmcost.TierPriority} {
@@ -185,6 +196,13 @@ func (b *book) priced(p llmcost.Provider, model, key string) []ProviderCost {
 		speeds := []*big.Rat{nil}
 		if r.Fast != nil {
 			speeds = append(speeds, r.Fast)
+		}
+		if r.WebSearch != nil {
+			out = append(out, ProviderCost{
+				Provider: p, Model: model, Key: key, Source: b.source(key),
+				Tier: tier, Component: ComponentWebSearch,
+				Cost: new(big.Rat).Mul(r.WebSearch, perMillion),
+			})
 		}
 		ctx := append([]llmcost.Tier{{TierRates: r.Base}}, r.Tiers...)
 		for _, fast := range speeds {

@@ -2,6 +2,7 @@ package listprice
 
 import (
 	"fmt"
+	"regexp"
 	"slices"
 
 	"github.com/prassoai/llmcost"
@@ -56,6 +57,11 @@ func newBook(published []model, overrides map[string]override) *book {
 			aliases[m.id] = m.key
 		}
 		seen[m.id] = true
+	}
+	for _, k := range llmcost.Models(llmcost.ProviderOpenAI) {
+		if ChatSearchModel(k) {
+			rates[k] = nil
+		}
 	}
 	return &book{
 		table:     llmcost.New(llmcost.Config{Aliases: aliases, Overrides: rates}),
@@ -152,3 +158,15 @@ func (b *book) priceable(model string, tier llmcost.ServiceTier, speed string) b
 	}
 	return false
 }
+
+// chatSearchModel matches OpenAI's dedicated Chat Completions search models —
+// gpt-4o-search-preview, gpt-4o-mini-search-preview, gpt-5-search-api and
+// their dated snapshots.
+var chatSearchModel = regexp.MustCompile(`-search-(preview|api)(-\d{4}-\d{2}-\d{2})?$`)
+
+// ChatSearchModel reports whether model is one of OpenAI's dedicated Chat
+// Completions search models, which search the web on every request and report
+// no search count, so no call to one can be charged its search fee. The book
+// has no price for them: [Book] leaves them out and [Of] and [Priceable]
+// refuse them. A gateway uses it to name the refusal before a call.
+func ChatSearchModel(model string) bool { return chatSearchModel.MatchString(model) }
