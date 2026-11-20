@@ -84,61 +84,62 @@ func (b *book) source(model string) Source {
 }
 
 func (b *book) of(model string, u llmcost.Usage) (Price, bool) {
-	for i, d := range append([]llmcost.Usage{u}, degraded(u)...) {
-		c, ok := b.table.Cost(model, d)
-		if !ok {
-			continue
+	if p, ok := b.price(model, u, b.source(model)); ok {
+		return p, true
+	}
+	for _, d := range degraded(u) {
+		if p, ok := b.price(model, d, SourceDegraded); ok {
+			return p, true
 		}
-		// Dropping a component never makes usage that priced unpriceable.
-		tokens, _ := b.table.Cost(model, withoutWebSearch(d))
-		src := SourceDegraded
-		if i == 0 {
-			src = b.source(model)
-		}
-		return Price{Cost: c, Price: Markup(c), WebSearchCost: c - tokens, WebSearchPrice: Markup(c - tokens), Source: src}, true
 	}
 	return Price{}, false
 }
 
-// degraded lists u's re-pricings with the response-reported dimensions
-// dropped, least lossy first: Anthropic's geo, its 1-hour cache-write split,
-// both, then each of those with the web searches dropped as well. OpenAI
-// usage drops only its web searches; Fireworks usage has no such dimension.
-func degraded(u llmcost.Usage) []llmcost.Usage {
-	switch u := u.(type) {
-	case llmcost.ClaudeUsage:
-		var out []llmcost.Usage
-		for drop := 1; drop < 8; drop++ {
-			d := u
-			if drop&1 != 0 {
-				d.InferenceGeo = ""
-			}
-			if drop&2 != 0 {
-				d.CacheCreation1hInputTokens = 0
-			}
-			if drop&4 != 0 {
-				d.WebSearchRequests = 0
-			}
-			out = append(out, d)
-		}
-		return out
-	case llmcost.OpenAIUsage:
-		return []llmcost.Usage{withoutWebSearch(u)}
+// price is u's all-in price, with the part its web searches take. A call
+// that searched is priced twice — all-in and tokens alone — and the
+// difference is the search fee; one that did not has no search part.
+func (b *book) price(model string, u llmcost.Usage, src Source) (Price, bool) {
+	c, ok := b.table.Cost(model, u)
+	if !ok {
+		return Price{}, false
 	}
-	return nil
+	p := Price{Cost: c, Price: Markup(c), Source: src}
+	if tokens, searched := withoutWebSearch(u); searched {
+		t, _ := b.table.Cost(model, tokens) // dropping a component never makes usage that priced unpriceable
+		p.WebSearchCost, p.WebSearchPrice = c-t, Markup(c-t)
+	}
+	return p, true
 }
 
-// withoutWebSearch is u with its web searches dropped: the call's tokens alone.
-func withoutWebSearch(u llmcost.Usage) llmcost.Usage {
-	switch u := u.(type) {
-	case llmcost.ClaudeUsage:
-		u.WebSearchRequests = 0
-		return u
-	case llmcost.OpenAIUsage:
-		u.WebSearchRequests = 0
-		return u
+// degraded lists u's re-pricings with the response-reported dimensions
+// dropped, least lossy first: Anthropic's geo, its 1-hour cache-write split,
+// then both. Other usage has no such dimension. Web searches are not one: the
+// request declares the search tool, so a caller refuses an unpriceable one
+// before the call, like an unpriced service tier.
+func degraded(u llmcost.Usage) []llmcost.Usage {
+	c, ok := u.(llmcost.ClaudeUsage)
+	if !ok {
+		return nil
 	}
-	return u
+	noGeo, no1h := c, c
+	noGeo.InferenceGeo, no1h.CacheCreation1hInputTokens = "", 0
+	neither := noGeo
+	neither.CacheCreation1hInputTokens = 0
+	return []llmcost.Usage{noGeo, no1h, neither}
+}
+
+// withoutWebSearch is u with its web searches dropped — the call's tokens
+// alone — and whether it reported any.
+func withoutWebSearch(u llmcost.Usage) (llmcost.Usage, bool) {
+	switch v := u.(type) {
+	case llmcost.ClaudeUsage:
+		v.WebSearchRequests = 0
+		return v, v != u
+	case llmcost.OpenAIUsage:
+		v.WebSearchRequests, v.WebSearchPreview = 0, false
+		return v, v != u
+	}
+	return u, false
 }
 
 func (b *book) priceable(model string, tier llmcost.ServiceTier, speed string) bool {

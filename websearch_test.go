@@ -2,16 +2,18 @@ package llmcost
 
 import (
 	"math/big"
-	"strings"
 	"testing"
 )
 
-// withWebSearch adds LiteLLM's search_context_cost_per_query to a fixture
-// spec, the same fee at every search_context_size as the vendored data
-// carries for every Anthropic and GPT-5+ entry ($10 per 1,000 searches).
-func withWebSearch(spec, fee string) string {
-	return strings.Replace(spec, "{", `{
-	"search_context_cost_per_query": {"search_context_size_low": `+fee+`, "search_context_size_medium": `+fee+`, "search_context_size_high": `+fee+`},`, 1)
+// parseKey parses one fixture spec under key, through [Parse] — the path that
+// gives a key its provider's web search fee.
+func parseKey(t *testing.T, key, spec string) Rates {
+	t.Helper()
+	snap, err := Parse([]byte(`{"` + key + `": ` + spec + `}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return snap.models[key][TierStandard]
 }
 
 // TestWebSearchFee encodes the provider-hosted web search fee: each search
@@ -20,13 +22,13 @@ func withWebSearch(spec, fee string) string {
 // zero searches bill nothing extra. Two searches with opus-4-6's tokens
 // (1000×5e-6 + 100×2.5e-5 = 750 nls) are 750 + 2×1,000 = 2,750 nls.
 func TestWebSearchFee(t *testing.T) {
-	r := mustParse(t, withWebSearch(opus46Spec, "0.01"))
+	r := parseKey(t, "claude-opus-4-6", opus46Spec)
 	for searches, want := range map[int64]Nls{0: 750, 1: 1750, 2: 2750} {
 		if got, ok := price(r, ClaudeUsage{InputTokens: 1000, OutputTokens: 100, WebSearchRequests: searches}); !ok || got != want {
 			t.Errorf("%d searches = %d, %v; want %d, true", searches, got, ok, want)
 		}
 	}
-	o := mustParse(t, withWebSearch(gpt54Spec, "0.01"))
+	o := parseKey(t, "gpt-5.4", gpt54Spec)
 	if got, ok := price(o, OpenAIUsage{InputTokens: 1000, CachedInputTokens: 400, OutputTokens: 100, WebSearchRequests: 2}); !ok || got != 310+2000 {
 		t.Errorf("openai 2 searches = %d, %v; want 2310, true", got, ok)
 	}
@@ -38,8 +40,8 @@ func TestWebSearchFee(t *testing.T) {
 // every one of them. Each case's tokens are priced without searches and the
 // fee must add exactly 2,000 nls for two searches.
 func TestWebSearchFeeIsFlat(t *testing.T) {
-	claude := mustParse(t, withWebSearch(opus46Spec, "0.01"))
-	openai := mustParse(t, withWebSearch(gpt54Spec, "0.01"))
+	claude := parseKey(t, "claude-opus-4-6", opus46Spec)
+	openai := parseKey(t, "gpt-5.4", gpt54Spec)
 	for name, tc := range map[string]struct {
 		r          Rates
 		with, sans Usage
@@ -65,65 +67,63 @@ func TestWebSearchFeeIsFlat(t *testing.T) {
 	}
 }
 
-// TestWebSearchWithoutFeeFails encodes the no-silent-zero rule for searches:
-// a response reporting searches on a model with no search fee fails to price
-// rather than billing the searches as free, while the same model's
-// search-free usage still prices.
-func TestWebSearchWithoutFeeFails(t *testing.T) {
-	r := mustParse(t, opus46Spec)
-	if _, ok := price(r, ClaudeUsage{InputTokens: 1, WebSearchRequests: 1}); ok {
-		t.Error("searches priced on a model with no search fee")
-	}
-	if _, ok := price(r, ClaudeUsage{InputTokens: 1}); !ok {
-		t.Error("search-free usage failed to price")
-	}
-}
-
-// TestParseWebSearch encodes which search_context_cost_per_query shapes
-// price: one positive fee at every size. A fee that varies by size would
-// need the request's search_context_size, which no usage carries, so it is
-// unpriced rather than billing one size's fee for another; zero, negative,
-// unparseable and absent fees are unpriced too.
-func TestParseWebSearch(t *testing.T) {
-	for name, tc := range map[string]struct {
-		field string
+// TestWebSearchFeeOwnership pins who sets the search fee: the provider's list
+// fee for its standard tool, on every key Anthropic or OpenAI bills — not
+// LiteLLM's per-model search_context_cost_per_query, which is absent for
+// gpt-5.4 and carries the retired preview tool's $25 per 1,000 for gpt-4o.
+// Keys another provider bills (Azure, Vertex AI, Fireworks) and the OpenAI
+// models whose search content bills as a fixed token block price no search.
+func TestWebSearchFeeOwnership(t *testing.T) {
+	fee := big.NewRat(1, 100)
+	for _, tc := range []struct {
+		model string
+		tier  ServiceTier
 		want  *big.Rat
 	}{
-		"uniform":    {`"search_context_cost_per_query": {"search_context_size_low": 0.01, "search_context_size_medium": 0.01, "search_context_size_high": 0.01},`, big.NewRat(1, 100)},
-		"varies":     {`"search_context_cost_per_query": {"search_context_size_low": 0.03, "search_context_size_medium": 0.035, "search_context_size_high": 0.05},`, nil},
-		"zero":       {`"search_context_cost_per_query": {"search_context_size_low": 0, "search_context_size_medium": 0, "search_context_size_high": 0},`, nil},
-		"negative":   {`"search_context_cost_per_query": {"search_context_size_medium": -0.01},`, nil},
-		"not number": {`"search_context_cost_per_query": {"search_context_size_medium": "ten"},`, nil},
-		"not object": {`"search_context_cost_per_query": 0.01,`, nil},
-		"absent":     {``, nil},
+		{"claude-opus-5-5", TierStandard, fee},
+		{"claude-opus-4-8", TierStandard, fee},
+		{"claude-haiku-4-5", TierStandard, fee},
+		{"gpt-5.4", TierStandard, fee},
+		{"gpt-5.4", TierPriority, fee},
+		{"gpt-5.5", TierFlex, fee},
+		{"gpt-6.2-sol", TierStandard, fee},
+		{"gpt-4o", TierStandard, fee},
+		{"gpt-4o-mini", TierStandard, nil},
+		{"gpt-4.1-mini-2025-04-14", TierStandard, nil},
+		{"azure/gpt-5.4", TierStandard, nil},
+		{"vertex_ai/claude-sonnet-4-5", TierStandard, nil},
+		{"fireworks_ai/accounts/fireworks/models/deepseek-v4-flash", TierStandard, nil},
 	} {
-		got := mustParse(t, strings.Replace(sonnet45Spec, "{", "{"+tc.field, 1)).WebSearch
-		if (got == nil) != (tc.want == nil) || (got != nil && got.Cmp(tc.want) != 0) {
-			t.Errorf("%s: WebSearch = %v, want %v", name, got, tc.want)
+		r, ok := RatesFor(tc.model, tc.tier)
+		if !ok {
+			t.Errorf("%s at %s no longer resolves", tc.model, tc.tier)
+			continue
 		}
+		if (r.WebSearch == nil) != (tc.want == nil) || (r.WebSearch != nil && r.WebSearch.Cmp(tc.want) != 0) {
+			t.Errorf("%s at %s: WebSearch = %v, want %v", tc.model, tc.tier, r.WebSearch, tc.want)
+		}
+	}
+	if got, ok := Cost("gpt-5.4", OpenAIUsage{InputTokens: 1000, OutputTokens: 100, WebSearchRequests: 2}); !ok || got != 400+2000 {
+		t.Errorf("Cost(gpt-5.4, 2 searches) = %d, %v; want 2400, true", got, ok)
+	}
+	if _, ok := Cost("gpt-4o-mini", OpenAIUsage{InputTokens: 1000, WebSearchRequests: 1}); ok {
+		t.Error("searches priced on gpt-4o-mini, whose search content bills as a fixed block")
+	}
+	if _, ok := Cost("gpt-4o-mini", OpenAIUsage{InputTokens: 1000}); !ok {
+		t.Error("gpt-4o-mini's search-free usage failed to price")
 	}
 }
 
-// TestVendoredWebSearchFees pins the vendored search fees murmur bills: $10
-// per 1,000 searches on current Anthropic and GPT-5+ models, at every
-// service tier. If a sync moves one, a published search price moves with it —
-// verify against the provider's pricing page before merging.
-func TestVendoredWebSearchFees(t *testing.T) {
-	for model, tiers := range map[string][]ServiceTier{
-		"claude-opus-5-5": {TierStandard},
-		"claude-opus-4-8": {TierStandard},
-		"gpt-5.5":         {TierStandard, TierFlex, TierPriority},
-		"gpt-6.2-sol":     {TierStandard},
-	} {
-		for _, tier := range tiers {
-			r, ok := RatesFor(model, tier)
-			if !ok || r.WebSearch == nil || r.WebSearch.Cmp(big.NewRat(1, 100)) != 0 {
-				t.Errorf("%s at %s: WebSearch = %v, %v; want 0.01", model, tier, r.WebSearch, ok)
-			}
-		}
+// TestWebSearchPreviewFails encodes the explicit rule for the web_search_preview
+// tool: its fee depends on the model, so usage reporting preview searches
+// fails to price rather than billing the standard tool's fee, while the same
+// call without searches prices normally.
+func TestWebSearchPreviewFails(t *testing.T) {
+	if _, ok := Cost("gpt-5.5", OpenAIUsage{InputTokens: 1000, WebSearchRequests: 1, WebSearchPreview: true}); ok {
+		t.Error("preview searches priced")
 	}
-	if got, ok := Cost("claude-opus-4-8", ClaudeUsage{WebSearchRequests: 2}); !ok || got != 2000 {
-		t.Errorf("Cost(claude-opus-4-8, 2 searches) = %d, %v; want 2000, true", got, ok)
+	if _, ok := Cost("gpt-5.5", OpenAIUsage{InputTokens: 1000, WebSearchPreview: true}); !ok {
+		t.Error("a preview-tool call that searched nothing failed to price")
 	}
 }
 

@@ -147,13 +147,16 @@ modeled.
   test that each resolves — that test is your guarantee that a data sync
   can't silently drop a model you depend on.
 
-- **Hosted web search is a flat per-search fee.** `ClaudeUsage.WebSearchRequests`
+- **Hosted web search is the provider's per-search fee.** `ClaudeUsage.WebSearchRequests`
   (`usage.server_tool_use.web_search_requests`) and
-  `OpenAIUsage.WebSearchRequests` (the response's billable `search` actions)
-  each bill `Rates.WebSearch` — LiteLLM's `search_context_cost_per_query`,
-  $10 per 1,000 searches on current Anthropic and GPT-5+ models — on top of
-  the tokens, unscaled by any mode or tier. A size-dependent fee, or none,
-  fails to price usage that reports searches.
+  `OpenAIUsage.WebSearchRequests` (`tool_usage.web_search.num_requests`)
+  each bill `Rates.WebSearch` on top of the tokens, unscaled by any mode or
+  tier. The fee is the provider's list price for its standard tool — $10 per
+  1,000 searches on every key Anthropic or OpenAI bills — owned here, not read
+  from LiteLLM's per-model `search_context_cost_per_query`. OpenAI's
+  `web_search_preview` tool (`OpenAIUsage.WebSearchPreview`), gpt-4o-mini and
+  gpt-4.1-mini (fixed 8,000-token search blocks), and keys other providers
+  bill price no search: usage reporting one fails.
 
 `RatesFor(model, tier)` exposes the raw per-token
 rates — base and tiers — for callers that want them. `Models(provider)` lists

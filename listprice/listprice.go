@@ -47,9 +47,10 @@ func (s Source) String() string {
 // Cost and Price are all-in: tokens plus any hosted web search fees.
 // WebSearchCost and WebSearchPrice are the web search part of each, so the
 // tokens' part is Cost-WebSearchCost and Price-WebSearchPrice. WebSearchPrice
-// is [Markup](WebSearchCost); every vendored search fee is a whole multiple
-// of 20 nls, which the markup maps to whole nls, so marking the parts up
-// separately sums to exactly the marked-up total.
+// is [Markup](WebSearchCost); every search fee is a whole multiple of 20 nls
+// ($10 per 1,000 searches is 1,000 nls a search), which the markup maps to
+// whole nls, so marking the parts up separately sums to exactly the
+// marked-up total.
 type Price struct {
 	Cost, Price                   llmcost.Nls
 	WebSearchCost, WebSearchPrice llmcost.Nls
@@ -76,12 +77,13 @@ func Markup(cost llmcost.Nls) llmcost.Nls {
 // A call whose usage prices exactly is [SourceLLMCost] or [SourceOverride].
 // A call that cannot is re-priced with the response-reported dimensions a
 // request cannot foresee dropped — Anthropic's inference_geo to the base
-// rate, 1-hour cache writes to the 5-minute rate, web searches on a model
-// with no search fee to free — and is [SourceDegraded]:
+// rate, 1-hour cache writes to the 5-minute rate — and is [SourceDegraded]:
 // the call was already made, and recording it as free would be the one wrong
-// answer. Nothing else degrades: an unknown model, an unpriced service tier
-// or an unpriced fast mode is ok=false, and those are what [Priceable]
-// refuses before a call is made. Impossible counts panic, as in llmcost.
+// answer. Nothing else degrades: an unknown model, an unpriced service tier,
+// an unpriced fast mode and unpriced web searches are ok=false. [Priceable]
+// refuses the first three before a call is made; the request declares its
+// search tool, so a caller refuses that by probing Of with one search.
+// Impossible counts panic, as in llmcost.
 func Of(model string, u llmcost.Usage) (Price, bool) { return std.of(model, u) }
 
 // Priceable reports whether a request for model at tier and speed (the

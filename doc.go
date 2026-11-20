@@ -154,13 +154,20 @@
 // Provider-hosted web search bills a flat fee per search on top of the
 // tokens: [ClaudeUsage.WebSearchRequests] takes Anthropic's
 // usage.server_tool_use.web_search_requests, and
-// [OpenAIUsage.WebSearchRequests] the billable searches OpenAI's web search
-// tool ran (its "search" actions). Each prices at [Rates.WebSearch] —
-// LiteLLM's search_context_cost_per_query, $10 per 1,000 searches on current
-// Anthropic and GPT-5+ models — and no fast, geo, residency, service or
-// context tier scales it. Search results and search content already count
-// as the response's input tokens. A model without a search fee fails to
-// price usage that reports searches, as for any other unpriced component.
+// [OpenAIUsage.WebSearchRequests] OpenAI's tool_usage.web_search.num_requests.
+// Each prices at [Rates.WebSearch], and no fast, geo, residency, service or
+// context tier scales it. Search results and search content already count as
+// the response's input tokens.
+//
+// The fee is the provider's list price for its standard search tool, which
+// this module owns rather than reading LiteLLM's per-model
+// search_context_cost_per_query (absent for models the tool serves, and the
+// retired preview tool's fee for others): $10 per 1,000 searches on every key
+// whose litellm_provider is anthropic or openai. Every variant priced
+// differently is explicit and fails to price usage reporting searches:
+// OpenAI's web_search_preview tool ([OpenAIUsage.WebSearchPreview]), whose fee
+// depends on the model; gpt-4o-mini and gpt-4.1-mini, whose search content
+// bills as a fixed 8,000-token block; and keys other providers bill.
 //
 // # Precision and rounding
 //

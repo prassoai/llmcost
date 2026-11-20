@@ -31,7 +31,8 @@ func TestOfWebSearch(t *testing.T) {
 		if !ok || got != want {
 			t.Errorf("Of(%s, %+v) = %+v, %v; want %+v", tc.model, tc.usage, got, ok, want)
 		}
-		tokens, _ := llmcost.Cost(tc.model, withoutWebSearch(tc.usage))
+		sans, _ := withoutWebSearch(tc.usage)
+		tokens, _ := llmcost.Cost(tc.model, sans)
 		if got.Cost-got.WebSearchCost != tokens || got.Price-got.WebSearchPrice != Markup(tokens) {
 			t.Errorf("Of(%s, %+v): token part %d/%d, want the search-free call's %d/%d", tc.model, tc.usage,
 				got.Cost-got.WebSearchCost, got.Price-got.WebSearchPrice, tokens, Markup(tokens))
@@ -39,31 +40,37 @@ func TestOfWebSearch(t *testing.T) {
 	}
 }
 
-// TestOfDegradesUnpricedWebSearch requires a call that reported searches on
-// a model with no search fee — gpt-5.4, which LiteLLM lists without one — to
-// be charged its tokens rather than recorded as free, flagged as degraded.
-// Refusing such a request before it runs is the caller's job.
-func TestOfDegradesUnpricedWebSearch(t *testing.T) {
-	u := llmcost.OpenAIUsage{InputTokens: 1_000, OutputTokens: 1_000, WebSearchRequests: 2}
-	if _, ok := llmcost.Cost("gpt-5.4", u); ok {
-		t.Fatal("gpt-5.4 now prices web search; pick a model without a search fee")
+// TestOfWebSearchOnEveryProviderModel requires a search on a model LiteLLM
+// lists no search fee for — gpt-5.4 — to be charged OpenAI's list fee for the
+// tool like any other, not dropped or degraded.
+func TestOfWebSearchOnEveryProviderModel(t *testing.T) {
+	u := llmcost.OpenAIUsage{InputTokens: 1_000, OutputTokens: 100, WebSearchRequests: 2}
+	if got, ok := Of("gpt-5.4", u); !ok || got != (Price{Cost: 2_400, Price: 2_520, WebSearchCost: 2_000, WebSearchPrice: 2_100, Source: SourceLLMCost}) {
+		t.Errorf("Of(gpt-5.4, 2 searches) = %+v, %v; want tokens 400 + searches 2000, marked up", got, ok)
 	}
-	tokens, _ := llmcost.Cost("gpt-5.4", withoutWebSearch(u))
-	if got, ok := Of("gpt-5.4", u); !ok || got != (Price{Cost: tokens, Price: Markup(tokens), Source: SourceDegraded}) {
-		t.Errorf("Of = %+v, %v; want the tokens alone (%d), degraded", got, ok, tokens)
+}
+
+// TestOfRefusesUnpricedWebSearch requires searches the book has no price for
+// — the preview tool's, or a model whose search content bills as a fixed
+// block — to fail rather than degrade: the request declares the search tool,
+// so the caller refuses such a call before it runs, and a silent fallback
+// would charge the wrong fee. A degraded dimension elsewhere in the call
+// keeps its search fee.
+func TestOfRefusesUnpricedWebSearch(t *testing.T) {
+	for model, u := range map[string]llmcost.Usage{
+		"gpt-5.5":     llmcost.OpenAIUsage{InputTokens: 1_000, WebSearchRequests: 1, WebSearchPreview: true},
+		"gpt-4o-mini": llmcost.OpenAIUsage{InputTokens: 1_000, WebSearchRequests: 1},
+	} {
+		if got, ok := Of(model, u); ok {
+			t.Errorf("Of(%s, %+v) = %+v, want unpriced", model, u, got)
+		}
 	}
-	// Degrading the search keeps every dimension that still prices: a
-	// us-pinned Claude call with searches on a fixture model with a geo
-	// rate but no search fee keeps its geo premium.
-	b := newBook(
-		[]model{{"acme-1", "acme-key-1", llmcost.ProviderAnthropic}},
-		map[string]override{"acme-key-1": {llmcost.ProviderAnthropic, llmcost.Rates{
-			Base: llmcost.TierRates{Input: llmcost.MustParseRat("1e-6"), Output: llmcost.MustParseRat("2e-6")},
-			Geo:  map[string]*big.Rat{"us": llmcost.MustParseRat("1.1")},
-		}}},
-	)
-	if got, ok := b.of("acme-1", llmcost.ClaudeUsage{InputTokens: 1_000_000, InferenceGeo: "us", WebSearchRequests: 1}); !ok || got != (Price{Cost: 110_000, Price: 115_500, Source: SourceDegraded}) {
-		t.Errorf("of(geo + unpriced search) = %+v, %v; want $1.10 geo-priced tokens, degraded", got, ok)
+	u := llmcost.ClaudeUsage{InputTokens: 1_000, OutputTokens: 1_000, InferenceGeo: "us", WebSearchRequests: 1}
+	if _, ok := llmcost.Cost("claude-sonnet-4-5", u); ok {
+		t.Fatal("claude-sonnet-4-5 now prices geo us; pick a model without a geo rate")
+	}
+	if got, ok := Of("claude-sonnet-4-5", u); !ok || got.Source != SourceDegraded || got.WebSearchCost != 1_000 || got.WebSearchPrice != 1_050 {
+		t.Errorf("Of(geo + search) = %+v, %v; want degraded with the search fee kept", got, ok)
 	}
 }
 
