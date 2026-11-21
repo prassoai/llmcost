@@ -167,7 +167,8 @@
 // differently is explicit and fails to price usage reporting searches:
 // OpenAI's web_search_preview tool ([OpenAIUsage.WebSearchPreview]), whose fee
 // depends on the model; gpt-4o-mini and gpt-4.1-mini, whose search content
-// bills as a fixed 8,000-token block; and keys other providers bill.
+// bills as a fixed 8,000-token block ([FixedBlockSearch]); and keys other
+// providers bill.
 //
 // # Precision and rounding
 //

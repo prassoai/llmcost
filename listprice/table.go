@@ -2,6 +2,7 @@ package listprice
 
 import (
 	"fmt"
+	"regexp"
 	"slices"
 
 	"github.com/prassoai/llmcost"
@@ -31,7 +32,8 @@ type book struct {
 }
 
 // newBook panics on a malformed curation — a duplicate id, a provider the
-// book does not list, or anything [llmcost.New] rejects — because a price
+// book does not list, an OpenAI [ChatSearchModel] it publishes or overrides,
+// or anything [llmcost.New] rejects — because a price
 // book that cannot be built must fail at init, not price. A published model
 // whose key its provider no longer bills is suppressed rather than rejected:
 // the vendored data removed the model, so it drops out of the book like any
@@ -40,6 +42,9 @@ type book struct {
 func newBook(published []model, overrides map[string]override) *book {
 	rates := make(map[string]*llmcost.Rates, len(overrides))
 	for key, o := range overrides {
+		if o.provider == llmcost.ProviderOpenAI && ChatSearchModel(key) {
+			panic(fmt.Sprintf("listprice: override %q is a Chat Completions search model", key))
+		}
 		rates[key] = &o.rates
 	}
 	aliases := map[string]string{}
@@ -50,12 +55,19 @@ func newBook(published []model, overrides map[string]override) *book {
 			panic(fmt.Sprintf("listprice: model %q is published twice", m.id))
 		case !slices.Contains(pricers, m.provider):
 			panic(fmt.Sprintf("listprice: model %q has unlisted provider %q", m.id, m.provider))
+		case m.provider == llmcost.ProviderOpenAI && (ChatSearchModel(m.id) || ChatSearchModel(m.key)):
+			panic(fmt.Sprintf("listprice: model %q is a Chat Completions search model", m.id))
 		case !billed(m, overrides):
 			rates[m.id] = nil
 		case m.id != m.key:
 			aliases[m.id] = m.key
 		}
 		seen[m.id] = true
+	}
+	for _, k := range llmcost.Models(llmcost.ProviderOpenAI) {
+		if ChatSearchModel(k) {
+			rates[k] = nil
+		}
 	}
 	return &book{
 		table:     llmcost.New(llmcost.Config{Aliases: aliases, Overrides: rates}),
@@ -73,11 +85,7 @@ func billed(m model, overrides map[string]override) bool {
 }
 
 func (b *book) source(model string) Source {
-	key, ok := b.aliases[model]
-	if !ok {
-		key = model
-	}
-	if _, ok := b.overrides[key]; ok {
+	if _, ok := b.overrides[b.key(model)]; ok {
 		return SourceOverride
 	}
 	return SourceLLMCost
@@ -151,4 +159,36 @@ func (b *book) priceable(model string, tier llmcost.ServiceTier, speed string) b
 		return ok && r.Fast != nil
 	}
 	return false
+}
+
+// chatSearchModel matches OpenAI's dedicated Chat Completions search models —
+// gpt-4o-search-preview, gpt-4o-mini-search-preview, gpt-5-search-api and
+// their dated snapshots.
+var chatSearchModel = regexp.MustCompile(`-search-(preview|api)(-\d{4}-\d{2}-\d{2})?$`)
+
+// ChatSearchModel reports whether model is one of OpenAI's dedicated Chat
+// Completions search models, which search the web on every request and report
+// no search count, so no call to one can be charged its search fee. The book
+// has no price for them: [Book] leaves them out and [Of] and [Priceable]
+// refuse them. A gateway uses it to name the refusal before a call.
+func ChatSearchModel(model string) bool { return chatSearchModel.MatchString(model) }
+
+// SearchRefused reports whether model runs its provider's hosted web search
+// tool but the book prices none of its searches: OpenAI bills search content
+// on it as a fixed block of input tokens ([llmcost.FixedBlockSearch]), so [Of]
+// cannot charge a call that searched and a caller refuses one. A model whose
+// endpoint has no search tool at all, such as a legacy completion model, is
+// not refused search; it cannot search on any key.
+func SearchRefused(model string) bool { return std.searchRefused(model) }
+
+func (b *book) searchRefused(model string) bool {
+	r, ok := b.table.RatesFor(model, llmcost.TierStandard)
+	return ok && r.WebSearch == nil && llmcost.FixedBlockSearch(b.key(model))
+}
+
+func (b *book) key(model string) string {
+	if key, ok := b.aliases[model]; ok {
+		return key
+	}
+	return model
 }
