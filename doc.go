@@ -62,14 +62,16 @@
 //
 // # Time-billed voice sessions
 //
-// OpenAI's GPT-Live models bill voice sessions per second, not per token.
-// [LiveUsage] carries the session's billed seconds — usage.seconds from its
-// last session.usage.updated or session.closed event — and prices at the
-// key's [Rates.PerSecond] (LiteLLM's input_cost_per_second). Per-second rates
-// are read only for keys served on /v1/live/sessions; LiteLLM's other
+// OpenAI's GPT-Live models bill voice sessions per second, not per token, at
+// an active rate and a lower standby rate. [LiveUsage] carries the session's
+// active and standby seconds, priced at the key's [Rates.PerSecond] (LiteLLM's
+// input_cost_per_second) and [Rates.PerStandbySecond]. LiteLLM publishes no
+// standby rate, so the snapshot refuses standby seconds; a consumer that
+// knows the rate restates both in an override (listprice does). Per-second
+// rates are read only for keys served on /v1/live/sessions; LiteLLM's other
 // time-billed entries stay out of the table:
 //
-//	llmcost.Cost("gpt-live-1", llmcost.LiveUsage{Seconds: seconds})
+//	llmcost.Cost("gpt-live-1", llmcost.LiveUsage{ActiveSeconds: active, StandbySeconds: standby})
 //
 // # Service tiers
 //

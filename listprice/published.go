@@ -1,6 +1,10 @@
 package listprice
 
-import "github.com/prassoai/llmcost"
+import (
+	"math/big"
+
+	"github.com/prassoai/llmcost"
+)
 
 // published is the curated set of models sold by name, in the order the
 // price page lists them. An entry whose key the vendored data no longer
@@ -39,8 +43,21 @@ var published = []model{
 
 // overrides restate rates, keyed by llmcost key. Every entry makes a price
 // that no data sync can correct, so each must say why the snapshot is wrong
-// and carry a test that fails once it no longer is. There are none: every
-// published model prices from LiteLLM.
-var overrides = map[string]override{}
+// and carry a test that fails once it no longer is.
+//
+// GPT-Live: OpenAI bills a voice session per second at $0.05 a minute active
+// and $0.02 a minute in standby (https://developers.openai.com/api/docs/pricing).
+// LiteLLM lists only the active rate, and only as a rounded decimal
+// (0.000833333333333), so both rates are restated exactly.
+// TestGPTLiveOverrideStillNeeded fails once LiteLLM publishes a standby rate.
+var overrides = map[string]override{
+	"gpt-live-1":   gptLive,
+	"gpt-live-1.1": gptLive,
+}
+
+var gptLive = override{provider: llmcost.ProviderOpenAI, rates: llmcost.Rates{
+	PerSecond:        big.NewRat(5, 100*60), // $0.05 / minute
+	PerStandbySecond: big.NewRat(2, 100*60), // $0.02 / minute
+}}
 
 var std = newBook(published, overrides)

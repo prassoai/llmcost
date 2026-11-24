@@ -17,7 +17,7 @@ func TestGPTLivePricing(t *testing.T) {
 				seconds int64
 				want    Nls
 			}{{60, 5000}, {1, 84}, {0, 0}, {3600, 300000}} {
-				if got, ok := Cost(model, LiveUsage{Seconds: tc.seconds}); !ok || got != tc.want {
+				if got, ok := Cost(model, LiveUsage{ActiveSeconds: tc.seconds}); !ok || got != tc.want {
 					t.Errorf("Cost(%d s) = %d, %v; want %d, true", tc.seconds, got, ok, tc.want)
 				}
 			}
@@ -34,7 +34,7 @@ func TestGPTLivePricing(t *testing.T) {
 // throughput) stay out of the table rather than pricing usage they do not
 // model.
 func TestLiveUsageRefusedByTokenModels(t *testing.T) {
-	if _, ok := Cost("gpt-5.5", LiveUsage{Seconds: 60}); ok {
+	if _, ok := Cost("gpt-5.5", LiveUsage{ActiveSeconds: 60}); ok {
 		t.Error("time usage priced on a token-billed model")
 	}
 	for _, key := range []string{"gpt-live-transcribe", "whisper-1", "gpt-realtime-translate"} {
@@ -55,7 +55,7 @@ func TestLiveUsageNegativePanics(t *testing.T) {
 			t.Fatal("negative seconds did not panic")
 		}
 	}()
-	Cost("gpt-live-1", LiveUsage{Seconds: -1})
+	Cost("gpt-live-1", LiveUsage{ActiveSeconds: -1})
 }
 
 // TestLiveRatesValidated: a per-second rate never makes malformed rates
@@ -88,5 +88,27 @@ func TestLiveRatesValidated(t *testing.T) {
 	parsed, ok := parseModel([]byte(`{"litellm_provider":"openai","supported_endpoints":["/v1/live/sessions"],"input_cost_per_second":-0.01}`))
 	if ok {
 		t.Errorf("a negative per-second entry parsed: %+v", parsed)
+	}
+}
+
+// TestLiveStandbySeconds: standby seconds bill at the standby rate, beside
+// active seconds at the active rate. LiteLLM publishes no standby rate, so the
+// snapshot refuses standby seconds rather than billing them as active, and a
+// standby rate without an active one, or a non-positive one, is unpriceable.
+func TestLiveStandbySeconds(t *testing.T) {
+	if _, ok := Cost("gpt-live-1", LiveUsage{ActiveSeconds: 60, StandbySeconds: 30}); ok {
+		t.Error("standby seconds priced without a standby rate")
+	}
+	table := New(Config{Overrides: map[string]*Rates{"live": {PerSecond: big.NewRat(5, 6000), PerStandbySecond: big.NewRat(2, 6000)}}})
+	if got, ok := table.Cost("live", LiveUsage{ActiveSeconds: 60, StandbySeconds: 30}); !ok || got != 6000 {
+		t.Errorf("Cost(60 active, 30 standby) = %d, %v; want 6000 ($0.06), true", got, ok)
+	}
+	for name, r := range map[string]Rates{
+		"standby without active": {PerStandbySecond: big.NewRat(2, 6000)},
+		"zero standby":           {PerSecond: big.NewRat(5, 6000), PerStandbySecond: new(big.Rat)},
+	} {
+		if r.priceable() {
+			t.Errorf("%s: priceable", name)
+		}
 	}
 }

@@ -160,13 +160,14 @@ func validateOverrideRates(model string, tier ServiceTier, r Rates) {
 // Rates without corrupting the original.
 func (r Rates) clone() Rates {
 	out := Rates{
-		Base:            r.Base.clone(),
-		Fast:            cpRat(r.Fast),
-		Geo:             cloneRatMap(r.Geo),
-		RegionalUplift:  cloneRatMap(r.RegionalUplift),
-		WebSearch:       cpRat(r.WebSearch),
-		PerSecond:       cpRat(r.PerSecond),
-		litellmProvider: r.litellmProvider,
+		Base:             r.Base.clone(),
+		Fast:             cpRat(r.Fast),
+		Geo:              cloneRatMap(r.Geo),
+		RegionalUplift:   cloneRatMap(r.RegionalUplift),
+		WebSearch:        cpRat(r.WebSearch),
+		PerSecond:        cpRat(r.PerSecond),
+		PerStandbySecond: cpRat(r.PerStandbySecond),
+		litellmProvider:  r.litellmProvider,
 	}
 	if len(r.Tiers) > 0 {
 		out.Tiers = make([]Tier, len(r.Tiers))
