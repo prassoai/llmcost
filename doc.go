@@ -10,7 +10,8 @@
 //
 // The providers report token counts DIFFERENTLY, so [Cost] takes a sealed
 // [Usage] interface implemented only by [ClaudeUsage], [OpenAIUsage], and
-// [FireworksUsage]. Each provider type takes that provider's RAW reported
+// [FireworksUsage] — plus [LiveUsage] for OpenAI's time-billed GPT-Live voice
+// sessions. Each provider type takes that provider's RAW reported
 // counts and normalizes them into disjoint billable components internally,
 // and carries exactly the pricing modes that provider actually has — so a
 // mode a provider does not offer is inexpressible, not merely unpriceable.
@@ -58,6 +59,19 @@
 // [RatesFor] exposes the raw per-token rates (base, tiers, and multipliers)
 // for callers that want them, and [Models] lists every key a first-party
 // provider prices.
+//
+// # Time-billed voice sessions
+//
+// OpenAI's GPT-Live models bill voice sessions per second, not per token, at
+// an active rate and a lower standby rate. [LiveUsage] carries the session's
+// active and standby seconds, priced at the key's [Rates.PerSecond] (LiteLLM's
+// input_cost_per_second) and [Rates.PerStandbySecond]. LiteLLM publishes no
+// standby rate, so the snapshot refuses standby seconds; a consumer that
+// knows the rate restates both in an override (listprice does). Per-second
+// rates are read only for keys served on /v1/live/sessions; LiteLLM's other
+// time-billed entries stay out of the table:
+//
+//	llmcost.Cost("gpt-live-1", llmcost.LiveUsage{ActiveSeconds: active, StandbySeconds: standby})
 //
 // # Service tiers
 //
