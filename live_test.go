@@ -1,6 +1,7 @@
 package llmcost
 
 import (
+	"math/big"
 	"slices"
 	"testing"
 )
@@ -55,4 +56,37 @@ func TestLiveUsageNegativePanics(t *testing.T) {
 		}
 	}()
 	Cost("gpt-live-1", LiveUsage{Seconds: -1})
+}
+
+// TestLiveRatesValidated: a per-second rate never makes malformed rates
+// priceable. A non-positive per-second rate is unpriceable, and a key that
+// supplies token rates alongside one must supply priceable token rates —
+// otherwise a negative token rate would bill a negative cost. Overrides are
+// held to the same rule at construction.
+func TestLiveRatesValidated(t *testing.T) {
+	sec := MustParseRat("0.01")
+	for name, r := range map[string]Rates{
+		"negative per second": {PerSecond: MustParseRat("-0.01")},
+		"zero per second":     {PerSecond: new(big.Rat)},
+		"bad token rates":     {Base: TierRates{Input: MustParseRat("-1"), Output: MustParseRat("1")}, PerSecond: sec},
+	} {
+		if r.priceable() {
+			t.Errorf("%s: priceable", name)
+		}
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("%s: override accepted", name)
+				}
+			}()
+			New(Config{Overrides: map[string]*Rates{"x": &r}})
+		}()
+	}
+	if !(Rates{PerSecond: sec}).priceable() {
+		t.Error("a per-second-only key is not priceable")
+	}
+	parsed, ok := parseModel([]byte(`{"litellm_provider":"openai","supported_endpoints":["/v1/live/sessions"],"input_cost_per_second":-0.01}`))
+	if ok {
+		t.Errorf("a negative per-second entry parsed: %+v", parsed)
+	}
 }

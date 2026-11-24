@@ -592,9 +592,14 @@ func (t TierRates) priceable() bool {
 }
 
 // priceable reports whether r can bill anything: priceable token rates, or a
-// positive per-second rate for a time-billed key.
+// positive per-second rate on a key that supplies no token rate at all. A
+// per-second rate never admits malformed token rates, and a non-positive one
+// is never priceable.
 func (r Rates) priceable() bool {
-	return r.Base.priceable() || (r.PerSecond != nil && r.PerSecond.Sign() > 0)
+	if r.PerSecond == nil {
+		return r.Base.priceable()
+	}
+	return r.PerSecond.Sign() > 0 && (r.Base == TierRates{} || r.Base.priceable())
 }
 
 // ceilNls converts a non-negative exact USD amount to nls, rounding up.
