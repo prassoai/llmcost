@@ -8,7 +8,8 @@ import (
 	"github.com/prassoai/llmcost"
 )
 
-// Component is one billable token class.
+// Component is one billable class: a token class, or a second of a
+// time-billed session.
 type Component uint8
 
 const (
@@ -19,6 +20,9 @@ const (
 	// OpenAI's only cache write.
 	ComponentCacheWrite5m
 	ComponentCacheWrite1h
+	// ComponentSecond is one second of an OpenAI GPT-Live voice session. Its
+	// rows are priced per second, not per million tokens.
+	ComponentSecond
 )
 
 func (c Component) String() string {
@@ -33,12 +37,14 @@ func (c Component) String() string {
 		return "cache_write_5m"
 	case ComponentCacheWrite1h:
 		return "cache_write_1h"
+	case ComponentSecond:
+		return "second"
 	}
 	return fmt.Sprintf("Component(%d)", c)
 }
 
 // Rate is one list price: what murmur charges per million tokens of one
-// component, for one model at one service tier, speed and context tier. A
+// token component, or per second of [ComponentSecond], for one model at one service tier, speed and context tier. A
 // model has one price whichever provider serves it: the price is set by
 // PricedBy's cost, and every provider's own cost is a [ProviderCost].
 type Rate struct {
@@ -58,7 +64,8 @@ type Rate struct {
 	AbovePromptTokens int64
 	Component         Component
 	// Cost is PricedBy's cost and Price is Cost with [MarkupBasisPoints]
-	// applied, unrounded; both are exact USD per million tokens.
+	// applied, unrounded; both are exact USD per million tokens, or per
+	// second for [ComponentSecond].
 	Cost, Price *big.Rat
 }
 
@@ -75,7 +82,8 @@ type ProviderCost struct {
 	Fast              bool
 	AbovePromptTokens int64
 	Component         Component
-	// Cost is exact USD per million tokens.
+	// Cost is exact USD per million tokens, or per second for
+	// [ComponentSecond].
 	Cost *big.Rat
 }
 
@@ -214,6 +222,13 @@ func (b *book) priced(p llmcost.Provider, model, key string) []ProviderCost {
 					})
 				}
 			}
+		}
+		// Time is never tiered, scaled or fast: one row per service tier.
+		if r.PerSecond != nil {
+			out = append(out, ProviderCost{
+				Provider: p, Model: model, Key: key, Source: b.source(key),
+				Tier: tier, Component: ComponentSecond, Cost: new(big.Rat).Set(r.PerSecond),
+			})
 		}
 	}
 	return out

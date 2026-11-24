@@ -33,6 +33,8 @@ var published = []model{
 	{"gpt-5.4-mini", "gpt-5.4-mini", llmcost.ProviderOpenAI},
 	{"gpt-5.3-codex", "gpt-5.3-codex", llmcost.ProviderOpenAI},
 	{"gpt-5.2", "gpt-5.2", llmcost.ProviderOpenAI},
+	{"gpt-live-1.1", "gpt-live-1.1", llmcost.ProviderOpenAI},
+	{"gpt-live-1", "gpt-live-1", llmcost.ProviderOpenAI},
 }
 
 // overrides restate rates, keyed by llmcost key. Every entry makes a price

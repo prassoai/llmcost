@@ -127,7 +127,7 @@ func NewFrom(snap *Snapshot, cfg Config) *Table {
 // asserts for every parsed snapshot entry: priceable base rates, strictly
 // ascending positive tier thresholds with priceable rates, positive multipliers.
 func validateOverrideRates(model string, tier ServiceTier, r Rates) {
-	if !r.Base.priceable() {
+	if !r.priceable() {
 		panic(fmt.Sprintf("llmcost: %s/%s: unpriceable base rates", model, tier))
 	}
 	for i, t := range r.Tiers {
@@ -165,6 +165,7 @@ func (r Rates) clone() Rates {
 		Geo:             cloneRatMap(r.Geo),
 		RegionalUplift:  cloneRatMap(r.RegionalUplift),
 		WebSearch:       cpRat(r.WebSearch),
+		PerSecond:       cpRat(r.PerSecond),
 		litellmProvider: r.litellmProvider,
 	}
 	if len(r.Tiers) > 0 {
