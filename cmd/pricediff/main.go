@@ -65,8 +65,9 @@ type row struct {
 	Fast      bool   `json:"fast"`
 	Above     int64  `json:"above_prompt_tokens"`
 	Component string `json:"component"`
-	// Cost is exact USD per million tokens, or searches for web_search. It encodes as a big.Rat string,
-	// so a malformed one fails decoding.
+	// Cost is exact USD per million tokens, per million searches for
+	// web_search, or per second for active_second and standby_second. It
+	// encodes as a big.Rat string, so a malformed one fails decoding.
 	Cost *big.Rat `json:"cost"`
 }
 
@@ -181,11 +182,11 @@ func (d delta) report() string {
 			models[i] = c.base.Model
 		}
 		slices.Sort(models)
-		fmt.Fprintf(&s, "\nPublished rates removed from `%s`. Merging takes them out of the book: consumers refuse them before a call, and the price page drops them. Last list prices, USD per 1M tokens (web_search: per 1M searches):\n\n", strings.Join(slices.Compact(models), "`, `"))
+		fmt.Fprintf(&s, "\nPublished rates removed from `%s`. Merging takes them out of the book: consumers refuse them before a call, and the price page drops them. Last list prices, USD per 1M tokens (web_search: per 1M searches; active_second, standby_second: per second):\n\n", strings.Join(slices.Compact(models), "`, `"))
 		table(&s, d.removed)
 	}
 	if changes := slices.Concat(d.repriced, d.added); len(changes) > 0 {
-		s.WriteString("\nPublished list prices, USD per 1M tokens (web_search: per 1M searches):\n\n")
+		s.WriteString("\nPublished list prices, USD per 1M tokens (web_search: per 1M searches; active_second, standby_second: per second):\n\n")
 		table(&s, changes)
 	}
 	return s.String()

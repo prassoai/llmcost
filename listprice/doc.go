@@ -32,13 +32,15 @@
 // The book publishes a curated set of models by name, each mapped to the
 // llmcost key that prices it. [Book] enumerates the rate card — published
 // models first, then every other first-party key llmcost prices — as exact
-// USD per million tokens, and its hosted web search fee as USD per million
-// searches ([ComponentWebSearch]). [ChatSearchModel] names OpenAI's Chat
-// Completions search models, which the book leaves out: they search on every
-// request and report no count to charge. [SearchRefused] names the models
-// that run the search tool but have no search price, because their search
-// content bills as a fixed block of input tokens. A model has one list price
-// whichever provider serves it, set by the cost of its pricing provider ([Rate.PricedBy]). [Costs]
+// USD per million tokens, its hosted web search fee as USD per million
+// searches ([ComponentWebSearch]), and per second for GPT-Live voice sessions
+// ([ComponentActiveSecond] and [ComponentStandbySecond], priced from
+// [llmcost.LiveUsage]). [ChatSearchModel] names OpenAI's Chat Completions
+// search models, which the book leaves out: they search on every request and
+// report no count to charge. [SearchRefused] names the models that run the
+// search tool but have no search price, because their search content bills as
+// a fixed block of input tokens. A model has one list price whichever provider
+// serves it, set by the cost of its pricing provider ([Rate.PricedBy]). [Costs]
 // enumerates what each provider charges for the same models, so a price can
 // be read beside every cost it could be served at.
 //

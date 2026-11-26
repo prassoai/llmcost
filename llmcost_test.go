@@ -713,7 +713,8 @@ func TestUnknownModel(t *testing.T) {
 
 // TestTableInvariants encodes structural guarantees over every parsed model
 // and service tier: the standard tier always present (it anchors table
-// membership), only known service tiers stored, priceable base rates, and
+// membership), only known service tiers stored, priceable rates (token or
+// per-second), and
 // context-window tiers strictly ascending with positive thresholds and
 // priceable rates. A violation means parseModel accepted garbage.
 func TestTableInvariants(t *testing.T) {
@@ -725,7 +726,7 @@ func TestTableInvariants(t *testing.T) {
 			if _, ok := serviceSuffixes[tier]; !ok {
 				t.Errorf("%s: unknown service tier %q in table", model, tier)
 			}
-			if !r.Base.priceable() {
+			if !r.priceable() {
 				t.Errorf("%s/%s: unpriceable base rates in table", model, tier)
 			}
 			for i, ctx := range r.Tiers {

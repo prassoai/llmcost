@@ -205,6 +205,19 @@ type FireworksUsage struct {
 	OutputTokens int64
 }
 
+// LiveUsage is one OpenAI GPT-Live voice session's usage: its billed seconds,
+// split by the rate they bill at. GPT-Live bills voice by time, not tokens:
+// ActiveSeconds at the active rate ([Rates.PerSecond]) and StandbySeconds —
+// time a WebRTC session spends in standby — at the lower standby rate
+// ([Rates.PerStandbySecond]). The type has no token counts and no modes. A
+// positive count on a rate the model does not publish fails to price, never
+// bills at the other rate. Counts are the session's cumulative totals — pass
+// the last ones, never a sum of events.
+type LiveUsage struct {
+	ActiveSeconds  int64
+	StandbySeconds int64
+}
+
 // TierRates are exact USD-per-token prices for the five billable components.
 // CacheCreation is the default 5-minute-TTL cache-write rate
 // (cache_creation_input_token_cost); CacheCreation1h is the 1-hour-TTL rate
@@ -258,6 +271,17 @@ type Rates struct {
 	Geo            map[string]*big.Rat
 	RegionalUplift map[string]*big.Rat
 	WebSearch      *big.Rat
+	// PerSecond is the exact USD price of one active second of an OpenAI
+	// GPT-Live voice session (LiteLLM's input_cost_per_second on a key served
+	// on /v1/live/sessions), priced through [LiveUsage.ActiveSeconds]. Nil
+	// means the key does not bill by time. A key with a per-second rate and
+	// no token rates prices only [LiveUsage].
+	PerSecond *big.Rat
+	// PerStandbySecond is the exact USD price of one standby second, priced
+	// through [LiveUsage.StandbySeconds]. LiteLLM publishes no standby rate,
+	// so the snapshot never sets it; a consumer restates it in an override.
+	// It requires PerSecond.
+	PerStandbySecond *big.Rat
 
 	// litellmProvider is the entry's upstream litellm_provider value —
 	// which service bills this key. [ModelSelector.Key] checks it so a
@@ -266,8 +290,8 @@ type Rates struct {
 	litellmProvider string
 }
 
-// Usage is one response's raw token usage. It is implemented only by
-// [ClaudeUsage], [OpenAIUsage], and [FireworksUsage] — the interface is
+// Usage is one response's raw usage. It is implemented only by
+// [ClaudeUsage], [OpenAIUsage], [FireworksUsage], and [LiveUsage] — the interface is
 // sealed, so the only way to supply usage is to hand a provider type its RAW
 // reported counts. Each provider type normalizes its own reporting
 // convention (Anthropic's disjoint counts, OpenAI's and Fireworks'
@@ -448,6 +472,19 @@ func (u FireworksUsage) premium(Rates) (premium, bool) { return premium{}, true 
 // variants, and the type has no tier field.
 func (u FireworksUsage) tier() (ServiceTier, bool) { return TierStandard, true }
 
+func (u LiveUsage) disjoint() components {
+	if u.ActiveSeconds < 0 || u.StandbySeconds < 0 {
+		panic(fmt.Sprintf("llmcost: negative seconds: %+v", u))
+	}
+	return components{seconds: u.ActiveSeconds, standbySeconds: u.StandbySeconds}
+}
+
+// premium is always unscaled: GPT-Live publishes one per-second rate.
+func (u LiveUsage) premium(Rates) (premium, bool) { return premium{}, true }
+
+// tier is always standard: GPT-Live has no service tiers.
+func (u LiveUsage) tier() (ServiceTier, bool) { return TierStandard, true }
+
 // RatesFor returns the raw per-token rates for model (a LiteLLM pricing
 // key) at a service tier, for callers that want them. ok is false if the
 // model is unknown, has no priceable rates at that tier, or the tier is not
@@ -464,9 +501,11 @@ func RatesFor(model string, tier ServiceTier) (Rates, bool) {
 // components are one response's token counts normalized to disjoint billable
 // parts: input is UNCACHED input only, cacheCreation is 5-minute-TTL writes
 // only (the 1h subset already split out into cacheCreation1h). webSearch
-// counts hosted web searches, billed per search rather than per token.
+// counts hosted web searches, billed per search rather than per token, and
+// seconds and standbySeconds count a time-billed session's active and standby
+// seconds.
 type components struct {
-	input, cacheRead, cacheCreation, cacheCreation1h, output, webSearch int64
+	input, cacheRead, cacheCreation, cacheCreation1h, output, webSearch, seconds, standbySeconds int64
 }
 
 // promptTokens is the request's total prompt size — the context-window tier
@@ -495,7 +534,9 @@ func cost(r Rates, c components, p premium) (Nls, bool) {
 		{t.CacheCreation, c.cacheCreation, p.cache},
 		{t.CacheCreation1h, c.cacheCreation1h, p.cache},
 		{t.Output, c.output, p.tokens},
-		{r.WebSearch, c.webSearch, nil}, // a flat per-search fee: never tiered or scaled
+		{r.WebSearch, c.webSearch, nil},             // a flat per-search fee: never tiered or scaled
+		{r.PerSecond, c.seconds, nil},               // time, not tokens: never tiered or scaled
+		{r.PerStandbySecond, c.standbySeconds, nil}, // standby time, at its own rate
 	} {
 		if part.tokens == 0 {
 			continue
@@ -558,6 +599,21 @@ func (t TierRates) priceable() bool {
 	pos := func(r *big.Rat) bool { return r != nil && r.Sign() > 0 }
 	nonneg := func(r *big.Rat) bool { return r == nil || r.Sign() >= 0 }
 	return pos(t.Input) && pos(t.Output) && nonneg(t.CacheRead) && nonneg(t.CacheCreation) && nonneg(t.CacheCreation1h)
+}
+
+// priceable reports whether r can bill anything: priceable token rates, or a
+// positive per-second rate on a key that supplies no token rate at all. A
+// per-second rate never admits malformed token rates, and a non-positive one
+// is never priceable; a standby rate must be positive and needs an active
+// rate.
+func (r Rates) priceable() bool {
+	if r.PerStandbySecond != nil && (r.PerSecond == nil || r.PerStandbySecond.Sign() <= 0) {
+		return false
+	}
+	if r.PerSecond == nil {
+		return r.Base.priceable()
+	}
+	return r.PerSecond.Sign() > 0 && (r.Base == TierRates{} || r.Base.priceable())
 }
 
 // ceilNls converts a non-negative exact USD amount to nls, rounding up.
@@ -781,7 +837,10 @@ func parseTier(fields map[string]json.RawMessage, svc string) (Rates, bool) {
 		}
 	}
 	r := Rates{Base: rates("", TierRates{})}
-	if !r.Base.priceable() {
+	if svc == "" && liveSession(fields) {
+		r.PerSecond = ratField(fields, "input_cost_per_second")
+	}
+	if !r.priceable() {
 		return Rates{}, false
 	}
 	if raw, ok := fields["litellm_provider"]; ok {
@@ -817,6 +876,19 @@ func parseTier(fields map[string]json.RawMessage, svc string) (Rates, bool) {
 	}
 	slices.SortFunc(r.Tiers, func(a, b Tier) int { return cmp.Compare(a.AbovePromptTokens, b.AbovePromptTokens) })
 	return r, true
+}
+
+// liveSessionEndpoint is the endpoint of OpenAI's GPT-Live voice sessions,
+// the one time-billed API this module prices ([LiveUsage]).
+const liveSessionEndpoint = "/v1/live/sessions"
+
+// liveSession reports whether an entry is served on [liveSessionEndpoint].
+// Per-second rates are read for these entries alone: LiteLLM lists
+// input_cost_per_second on transcription, provisioned-throughput and other
+// time-billed products whose usage this module does not model.
+func liveSession(fields map[string]json.RawMessage) bool {
+	var endpoints []string
+	return json.Unmarshal(fields["supported_endpoints"], &endpoints) == nil && slices.Contains(endpoints, liveSessionEndpoint)
 }
 
 // parseProviderMultipliers reads LiteLLM's provider_specific_entry object:

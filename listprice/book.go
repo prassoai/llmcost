@@ -8,7 +8,8 @@ import (
 	"github.com/prassoai/llmcost"
 )
 
-// Component is one billable token class.
+// Component is one billable class: a token class, or a second of a
+// time-billed session.
 type Component uint8
 
 const (
@@ -19,6 +20,12 @@ const (
 	// OpenAI's only cache write.
 	ComponentCacheWrite5m
 	ComponentCacheWrite1h
+	// ComponentActiveSecond is one active second of an OpenAI GPT-Live voice
+	// session. Its rows are priced per second, not per million tokens.
+	ComponentActiveSecond
+	// ComponentStandbySecond is one standby second of a GPT-Live session,
+	// priced per second at the standby rate.
+	ComponentStandbySecond
 	// ComponentWebSearch is a provider-hosted web search. Its unit is a
 	// search, not a token: the fee is flat per search, so a model rates it
 	// once per service tier, at standard speed and the base context tier.
@@ -37,14 +44,20 @@ func (c Component) String() string {
 		return "cache_write_5m"
 	case ComponentCacheWrite1h:
 		return "cache_write_1h"
+	case ComponentActiveSecond:
+		return "active_second"
+	case ComponentStandbySecond:
+		return "standby_second"
 	case ComponentWebSearch:
 		return "web_search"
 	}
 	return fmt.Sprintf("Component(%d)", c)
 }
 
-// Rate is one list price: what murmur charges per million units — tokens, or
-// searches for [ComponentWebSearch] — of one component, for one model at one service tier, speed and context tier. A
+// Rate is one list price: what murmur charges per million tokens of one
+// token component, per million searches of [ComponentWebSearch], or per
+// second of [ComponentActiveSecond] and [ComponentStandbySecond], for one
+// model at one service tier, speed and context tier. A
 // model has one price whichever provider serves it: the price is set by
 // PricedBy's cost, and every provider's own cost is a [ProviderCost].
 type Rate struct {
@@ -64,8 +77,9 @@ type Rate struct {
 	AbovePromptTokens int64
 	Component         Component
 	// Cost is PricedBy's cost and Price is Cost with [MarkupBasisPoints]
-	// applied, unrounded; both are exact USD per million of the component's
-	// units.
+	// applied, unrounded; both are exact USD per million tokens, per million
+	// searches for [ComponentWebSearch], or per second for the per-second
+	// components.
 	Cost, Price *big.Rat
 }
 
@@ -82,7 +96,8 @@ type ProviderCost struct {
 	Fast              bool
 	AbovePromptTokens int64
 	Component         Component
-	// Cost is exact USD per million of the component's units.
+	// Cost is exact USD per million tokens, per million searches for
+	// [ComponentWebSearch], or per second for the per-second components.
 	Cost *big.Rat
 }
 
@@ -231,6 +246,18 @@ func (b *book) priced(p llmcost.Provider, model, key string) []ProviderCost {
 						Cost: cost,
 					})
 				}
+			}
+		}
+		// Time is never tiered, scaled or fast: one row per rate and tier.
+		for _, s := range []struct {
+			component Component
+			rate      *big.Rat
+		}{{ComponentActiveSecond, r.PerSecond}, {ComponentStandbySecond, r.PerStandbySecond}} {
+			if s.rate != nil {
+				out = append(out, ProviderCost{
+					Provider: p, Model: model, Key: key, Source: b.source(key),
+					Tier: tier, Component: s.component, Cost: new(big.Rat).Set(s.rate),
+				})
 			}
 		}
 	}
